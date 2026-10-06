@@ -211,6 +211,9 @@
   .blockrow{display:flex;align-items:center;justify-content:space-between;font-size:14px;padding:5px 0;border-bottom:1px solid var(--rule)}
 
   #disclaimer{position:fixed;bottom:0;left:0;right:0;background:var(--paper);border-top:1px solid var(--rule);font-size:12px;color:var(--soft);padding:7px 18px;z-index:20}
+  #toast{position:fixed;left:50%;bottom:64px;transform:translateX(-50%);background:var(--ink);color:var(--paper);
+    font-size:13px;font-weight:700;padding:9px 16px;border-radius:20px;z-index:9999;max-width:88vw;text-align:center;
+    opacity:0;pointer-events:none;transition:opacity 0.2s;}
   @media (max-width:520px){ .day{min-height:60px;padding:5px 3px 3px} #monthlabel{font-size:22px} .day .tag{right:3px;font-size:10px} }
 </style>
 </head>
@@ -256,10 +259,12 @@
 <div id="plans"></div>
 
 <div id="disclaimer">Your crew and groups come from ActionSync. Free time, plans and messages are still local to this device &mdash; syncing those is next.</div>
+<div id="toast"></div>
 
 <div class="sheet-bg" id="sheet-bg"><div class="sheet-card" id="sheet-card"></div></div>
 
 <script src="actionsync-auth.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
 <script>
 /* ==================================================================
  * FRIEND CALENDAR — prototype #2 (replaces the weekly-grid v1).
@@ -299,6 +304,13 @@ function hourLabel(h){ if (h === 24 || h === 0) return '12am'; if (h === 12) ret
 function fmtRange(s, e){ return hourLabel(s) + '–' + hourLabel(e); }
 function longDate(s){ var d = parseDate(s); return WEEKDAYS[wdMon0(s)] + ', ' + MONTHS[d.getMonth()].slice(0,3) + ' ' + d.getDate(); }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+function showToast(msg){
+  var t = document.getElementById('toast');
+  if (!t) return;
+  t.textContent = msg; t.style.opacity = '1';
+  clearTimeout(window._fcToastT);
+  window._fcToastT = setTimeout(function(){ t.style.opacity = '0'; }, 2600);
+}
 // A real profile photo is a Storage https URL, not a data: URI -- this page's
 // own upload path (setPhoto below) only ever produces data:image URIs, so
 // that's still checked strictly there. Display has to accept both. Same
@@ -1123,17 +1135,130 @@ function renderPlans(){
 }
 
 /* ---------------- ADD FRIEND / ADD GROUP ---------------- */
-// Friends are real ActionSync crew now -- this page has no way (and no
-// business) fabricating a person. Point back at the real add-crew flow
-// instead of a fake "create a person" form.
+// Friends are real ActionSync crew. as_add_crew(other_id) already does
+// everything needed server-side -- creates crew in both directions and
+// hands back the other person's name -- so none of this needs new SQL,
+// just a way to get the other account's id: a QR code encoding a link
+// (?add=<id>), typed/pasted the same way, or a search limited to public
+// profiles (RLS only exposes a profiles row to its owner, their crew, a
+// shared group, or profile_vis='public' -- a "find anyone" search would
+// mostly return nothing and look broken, so this is honest about that
+// limit instead).
+function addCrewById(id, closeAfter){
+  if (!id || id === viewerId) return Promise.resolve({ ok:false, error:'That’s your own id.' });
+  if (!(window.AS && AS.auth)) return Promise.resolve({ ok:false, error:'Still loading.' });
+  var sb = AS.auth.client();
+  if (!sb) return Promise.resolve({ ok:false, error:'Still loading.' });
+  return sb.rpc('as_add_crew', { other_id:id }).then(function(r){
+    if (r.error) return { ok:false, error:r.error.message };
+    if (r.data && r.data.ok === false) return { ok:false, error:r.data.error };
+    return loadPeopleAndGroups().then(function(){
+      renderAll();
+      if (closeAfter) closeSheet();
+      return { ok:true, name:(r.data && r.data.name) || 'They' };
+    });
+  }).catch(function(e){ return { ok:false, error:e && e.message }; });
+}
+
+var _addFriendTab = 'qr';
 function openAddFriend(){
-  var card = document.getElementById('sheet-card');
-  card.innerHTML = '<h4>Add a friend</h4>'
-    + '<div style="font-size:14px;line-height:1.6;color:var(--soft);">Friends here are your ActionSync crew. '
-    + 'Add them in ActionSync (share or scan a crew code) and they’ll show up here next time you open this page.</div>'
-    + '<button class="btn ghost" id="fr-cancel" style="width:100%;margin-top:14px">Close</button>';
+  _addFriendTab = 'qr';
+  renderAddFriend();
   openSheet();
+}
+function renderAddFriend(){
+  var card = document.getElementById('sheet-card');
+  var tabs = [['qr', 'My QR'], ['scan', 'Add by link'], ['search', 'Search']];
+  var tabsHtml = tabs.map(function(t){
+    return '<button class="chip' + (t[0] === _addFriendTab ? ' on' : '') + '" data-fr-tab="' + t[0] + '">' + t[1] + '</button>';
+  }).join(' ');
+  var body = '';
+  var myUrl = location.origin + location.pathname + '?add=' + encodeURIComponent(viewerId);
+  if (_addFriendTab === 'qr') {
+    body = '<div style="font-size:13px;color:var(--soft);margin-bottom:10px;">Have a friend scan this with their phone’s camera — it opens this page and adds you as crew.</div>'
+      + '<div id="my-qr" style="display:flex;justify-content:center;margin:10px 0;"></div>'
+      + '<div style="font-size:11px;color:var(--dim);word-break:break-all;text-align:center;">' + esc(myUrl) + '</div>';
+  } else if (_addFriendTab === 'scan') {
+    body = '<div style="font-size:13px;color:var(--soft);margin-bottom:10px;">Paste the link (or just the code) they shared.</div>'
+      + '<div class="field"><input type="text" id="fr-link" placeholder="Paste their link or code"/></div>'
+      + '<div class="form-error" id="fr-link-error"></div>'
+      + '<button class="btn" id="fr-link-add" style="width:100%">Add</button>';
+  } else {
+    body = '<div style="font-size:13px;color:var(--soft);margin-bottom:10px;">Only searches profiles someone has made public — ask for their QR code or link otherwise.</div>'
+      + '<div class="field"><input type="text" id="fr-search" placeholder="Search by name"/></div>'
+      + '<div id="fr-search-results"></div>';
+  }
+  card.innerHTML = '<h4>Add a friend</h4><div class="chips-row">' + tabsHtml + '</div>' + body
+    + '<button class="btn ghost" id="fr-cancel" style="width:100%;margin-top:14px">Close</button>';
   document.getElementById('fr-cancel').addEventListener('click', closeSheet);
+  card.querySelectorAll('[data-fr-tab]').forEach(function(b){
+    b.addEventListener('click', function(){ _addFriendTab = b.dataset.frTab; renderAddFriend(); });
+  });
+
+  if (_addFriendTab === 'qr' && typeof QRCode !== 'undefined') {
+    new QRCode(document.getElementById('my-qr'), { text:myUrl, width:180, height:180 });
+  }
+  if (_addFriendTab === 'scan') {
+    document.getElementById('fr-link-add').addEventListener('click', function(){
+      var raw = document.getElementById('fr-link').value.trim();
+      var err = document.getElementById('fr-link-error');
+      var m = raw.match(/[?&]add=([^&\s]+)/);
+      var id = m ? decodeURIComponent(m[1]) : raw;
+      if (!/^[0-9a-f-]{36}$/i.test(id)) { err.textContent = 'That doesn’t look like a valid code or link.'; return; }
+      err.textContent = '';
+      addCrewById(id, true).then(function(res){
+        if (!res.ok) err.textContent = res.error || 'Could not add.';
+        else showToast(res.name + ' added to your crew');
+      });
+    });
+  }
+  if (_addFriendTab === 'search') {
+    var box = document.getElementById('fr-search'), results = document.getElementById('fr-search-results');
+    var timer = null;
+    box.addEventListener('input', function(){
+      clearTimeout(timer);
+      var q = box.value.trim();
+      if (!q) { results.innerHTML = ''; return; }
+      timer = setTimeout(function(){
+        if (!(window.AS && AS.auth)) return;
+        var sb = AS.auth.client();
+        if (!sb) return;
+        sb.from('profiles').select('id,name,display_name,first_name,last_name,photo_url')
+          .eq('profile_vis', 'public').ilike('display_name', '%' + q + '%').limit(10)
+          .then(function(r){
+            var rows = (r.data || []).filter(function(row){ return row.id !== viewerId; });
+            results.innerHTML = rows.length ? rows.map(function(row){
+              var nm = nameOfProfile(row);
+              return '<div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--rule);"><span>' + esc(nm) + '</span>'
+                + '<button class="btn small" data-add-id="' + row.id + '">Add</button></div>';
+            }).join('') : '<div style="font-size:13px;color:var(--soft);padding:8px 0">No public profiles match.</div>';
+            results.querySelectorAll('[data-add-id]').forEach(function(b){
+              b.addEventListener('click', function(){
+                b.disabled = true; b.textContent = 'Adding…';
+                addCrewById(b.dataset.addId, false).then(function(res){
+                  if (res.ok) { b.textContent = 'Added'; showToast(res.name + ' added to your crew'); }
+                  else { b.disabled = false; b.textContent = 'Add'; showToast(res.error || 'Could not add'); }
+                });
+              });
+            });
+          });
+      }, 350);
+    });
+  }
+}
+
+// ?add=<id> arrives from a scanned/opened QR link -- add immediately and
+// say who, mirroring the main app's own addCrewFromCode() (no separate
+// preview step; the RPC itself returns the name to confirm with).
+function handleAddFromLink(){
+  var q = new URLSearchParams(location.search);
+  var id = q.get('add');
+  if (!id) return;
+  history.replaceState(null, '', location.pathname);
+  if (id === viewerId) return;
+  addCrewById(id, false).then(function(res){
+    showToast(res.ok ? (res.name + ' added to your crew') : (res.error || 'Could not add that code'));
+  });
 }
 function openAddGroup(){
   var card = document.getElementById('sheet-card');
@@ -2846,7 +2971,10 @@ function syncMyCoreProfile(){
 
 function boot(){
   document.getElementById('auth-gate').style.display = 'none';
-  loadPeopleAndGroups().then(renderAll);
+  loadPeopleAndGroups().then(function(){
+    renderAll();
+    handleAddFromLink();
+  });
 }
 
 AS.auth.ready().then(function(state){
