@@ -497,10 +497,53 @@ function friendNote(viewer, id){ friendOrder(viewer); var x = _orderCache.byView
 function othersOrdered(){ return friendOrder(viewerId).map(personById); }
 
 /* ---------------- AVAILABILITY MATH ---------------- */
-function blockApplies(b, date){
+// Whether `date` matches this block's own pattern, ignoring any
+// per-date cancellation -- split out from blockApplies() so the day
+// sheet can tell "doesn't recur here at all" apart from "recurs here
+// but was cancelled for this one date" and show the second one instead
+// of just silently vanishing.
+function blockRecurs(b, date){
   if (b.date === date) return true;
   return b.repeat === 'weekly' && date >= b.date && wdMon0(date) === wdMon0(b.date)
     && (!b.repeatUntil || date <= b.repeatUntil);   // missing repeatUntil = old block from before the limit existed, left open
+}
+// A single date can be pulled out of a block without touching the rest
+// of it -- a plan consuming that slot, or you cancelling just one
+// occurrence because something off-app came up. Same mechanism either
+// way: a date in cancelledDates means "doesn't apply here," full stop,
+// whatever else the block's pattern says.
+function isCancelledOn(b, date){ return (b.cancelledDates || []).indexOf(date) !== -1; }
+function blockApplies(b, date){
+  return blockRecurs(b, date) && !isCancelledOn(b, date);
+}
+function cancelBlockDate(b, date){
+  b.cancelledDates = b.cancelledDates || [];
+  if (b.cancelledDates.indexOf(date) === -1) b.cancelledDates.push(date);
+}
+function uncancelBlockDate(b, date){
+  if (!b.cancelledDates) return;
+  var i = b.cancelledDates.indexOf(date);
+  if (i !== -1) b.cancelledDates.splice(i, 1);
+}
+// Pull `date` out of whichever of this person's blocks actually cover
+// [start,end) on it -- called when a plan is made (the creator) or
+// someone RSVPs going (them), so a plan on the calendar means you no
+// longer show as free for something else at the same time.
+function consumeAvailability(personId, date, start, end){
+  var p = personById(personId); if (!p) return;
+  p.blocks.forEach(function(b){
+    if (blockApplies(b, date) && b.start < end && b.end > start) cancelBlockDate(b, date);
+  });
+}
+// The inverse -- a plan being cancelled, or an RSVP backing off "going",
+// gives that slot back. Only touches a cancellation whose block's own
+// time actually matches what was booked, so it can't accidentally
+// restore an unrelated cancellation that happened to land on the same day.
+function restoreAvailability(personId, date, start, end){
+  var p = personById(personId); if (!p) return;
+  p.blocks.forEach(function(b){
+    if (isCancelledOn(b, date) && b.start < end && b.end > start) uncancelBlockDate(b, date);
+  });
 }
 // A block has a LEVEL ('free' = actually available, 'open' = around and up for something
 // if the person/plan is right) and an AUDIENCE (visibleTo: 'all' friends, or a list of person ids).
@@ -871,14 +914,25 @@ function renderDaySheet(){
 
   // --- the viewer's own blocks for this day, and a way to add one ---
   var mine = viewer.blocks.filter(function(b){ return blockApplies(b, date); });
+  // Recurs here but was pulled out of just this one date -- a plan
+  // consuming it, or a manual "not available this [day]" (something
+  // off-app came up). Shown separately so it reads as "still here,
+  // just not today" rather than silently vanishing from the list.
+  var cancelledMine = viewer.blocks.filter(function(b){ return blockRecurs(b, date) && isCancelledOn(b, date); });
   html += '<div class="sec">Your free time</div>';
   html += mine.length ? mine.map(function(b){
     return '<div class="blockrow"><span>' + fmtRange(b.start, b.end) + (b.level === 'open' ? ' <b style="font-weight:700">open</b>' : '')
       + ' <span style="color:var(--soft)">' + audienceLabel(b) + (b.area ? ', in ' + esc(b.area) : '') + (b.travel ? ', can travel' : '') + '</span>'
       + (b.repeat === 'weekly' ? ' <span style="color:var(--soft)">every ' + WEEKDAYS[wdMon0(b.date)]
           + (b.repeatUntil ? ' until ' + longDate(b.repeatUntil) : ', no end date') + '</span>' : '') + '</span>'
+      + (b.repeat === 'weekly' ? '<button class="btn small" data-cancel-date="' + b.id + '">Not this ' + WEEKDAYS[wdMon0(date)].slice(0, 3) + '</button>' : '')
       + '<button class="btn small danger" data-del="' + b.id + '">' + (b.repeat === 'weekly' ? 'Remove series' : 'Remove') + '</button></div>';
   }).join('') : '<div style="font-size:12px;color:var(--soft);padding:4px 0">Nothing offered this day.</div>';
+  html += cancelledMine.map(function(b){
+    return '<div class="blockrow" style="opacity:0.6"><span>' + fmtRange(b.start, b.end)
+      + ' <span style="color:var(--soft)">not available this day' + (PLANS.some(function(pl){ return pl.date === date && pl.rsvps[viewerId] === 'going' && pl.start < b.end && pl.end > b.start; }) ? ' — booked' : '') + '</span></span>'
+      + '<button class="btn small" data-uncancel-date="' + b.id + '">Make available again</button></div>';
+  }).join('');
 
   if (an.best.size >= 2) html += leftOutHtml(an.best.who, winH);
   html += '<button class="btn ghost" id="sheet-close" style="width:100%;margin-top:14px">Done</button>';
@@ -897,6 +951,20 @@ function renderDaySheet(){
   card.querySelectorAll('[data-del]').forEach(function(b){
     b.addEventListener('click', function(){
       viewer.blocks = viewer.blocks.filter(function(x){ return x.id !== b.dataset.del; });
+      renderDaySheet(); renderCalendar();
+    });
+  });
+  card.querySelectorAll('[data-cancel-date]').forEach(function(b){
+    b.addEventListener('click', function(){
+      var blk = viewer.blocks.filter(function(x){ return x.id === b.dataset.cancelDate; })[0];
+      if (blk) cancelBlockDate(blk, date);
+      renderDaySheet(); renderCalendar();
+    });
+  });
+  card.querySelectorAll('[data-uncancel-date]').forEach(function(b){
+    b.addEventListener('click', function(){
+      var blk = viewer.blocks.filter(function(x){ return x.id === b.dataset.uncancelDate; })[0];
+      if (blk) uncancelBlockDate(blk, date);
       renderDaySheet(); renderCalendar();
     });
   });
@@ -1052,6 +1120,9 @@ function renderPlanForm(date, start, end, whoIds, openIds, place){
     invited.forEach(function(id){ rsvps[id] = 'invited'; });
     PLANS.push({ id:newId('plan'), date:date, start:s, end:e, title:title, item: document.getElementById('plan-item').value || null, area: document.getElementById('plan-where').value.trim(),
                  spot: document.getElementById('plan-spot').value.trim(), notes: document.getElementById('plan-notes').value.trim(), creatorId:viewerId, rsvps:rsvps });
+    // The creator is auto-"going" (rsvps set above) -- they're committed
+    // to this slot now, so it stops showing as free for anything else.
+    consumeAvailability(viewerId, date, s, e);
     announcePlan(PLANS[PLANS.length - 1]);
     renderCalendar(); renderPlans(); renderBadges();
     renderPlanSent(PLANS[PLANS.length - 1]);
@@ -1085,6 +1156,9 @@ function cancelPlan(plan){
   var t = threadForPlan(plan);
   if (t) t.messages.push({ id:newId('m'), from:null, sys:true, ts:nowIso(), text:personById(plan.creatorId).name + ' cancelled this plan.' });
   Object.keys(plan.rsvps).forEach(function(i){ if (i !== plan.creatorId) notify(i, 'invite', personById(plan.creatorId).name + ' cancelled: ' + plan.title + ', ' + longDate(plan.date), { thread: t ? t.id : null, date:plan.date }); });
+  // Everyone who was committed ("going") gets that slot back -- the plan
+  // that was holding it no longer exists.
+  Object.keys(plan.rsvps).forEach(function(i){ if (plan.rsvps[i] === 'going') restoreAvailability(i, plan.date, plan.start, plan.end); });
   PLANS = PLANS.filter(function(x){ return x.id !== plan.id; });
 }
 
@@ -1127,9 +1201,14 @@ function renderPlans(){
   el.querySelectorAll('[data-rsvp]').forEach(function(b){
     b.addEventListener('click', function(){
       var plan = PLANS.filter(function(x){ return x.id === b.dataset.plan; })[0];
+      var was = plan.rsvps[viewerId];
       plan.rsvps[viewerId] = b.dataset.rsvp;
+      // Going means committed -- that slot stops showing as free for
+      // anything else. Backing off "going" gives it back.
+      if (b.dataset.rsvp === 'going' && was !== 'going') consumeAvailability(viewerId, plan.date, plan.start, plan.end);
+      else if (b.dataset.rsvp !== 'going' && was === 'going') restoreAvailability(viewerId, plan.date, plan.start, plan.end);
       announceRsvp(plan, viewerId, b.dataset.rsvp);
-      renderPlans(); renderBadges();
+      renderCalendar(); renderPlans(); renderBadges();
     });
   });
 }
