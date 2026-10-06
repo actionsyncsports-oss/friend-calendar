@@ -555,10 +555,11 @@ function canSee(b, ownerId, viewer){
 }
 // Where a block takes place, as the viewer is allowed to know it:
 //   explicit area on the block  >  the trip covering that date  >  the person's home area.
-// null = "wildcard": the person said they can travel, or keeps their area private from this viewer,
-// so we don't rule them out by place (and we say so).
+// null = "wildcard": the person said they can travel, is offering something remote
+// (a call, an online game -- nobody needs to be anywhere), or keeps their area
+// private from this viewer, so we don't rule them out by place (and we say so).
 function blockPlace(b, ownerId, date, viewer){
-  if (b.travel) return null;
+  if (b.travel || b.remote) return null;
   if (ownerId !== viewer && !canSeeArea(ownerId, viewer)) return null;
   var label = b.area || tripAreaOn(ownerId, date) || areaOf(ownerId);
   return label ? { key:townOf(label), label:label } : null;
@@ -582,10 +583,11 @@ function hourStates(personId, date, viewer){ return hourDetail(personId, date, v
 // "Rossland, BC" or "Trail, BC / Rossland, BC" or "can travel", for labelling someone's day.
 function placeLabelFor(personId, date, viewer){
   viewer = viewer || viewerId;
-  var seen = {}, out = [], trav = false;
+  var seen = {}, out = [], trav = false, rem = false;
   personById(personId).blocks.forEach(function(b){
     if (!blockApplies(b, date) || !canSee(b, personId, viewer)) return;
     var pl = blockPlace(b, personId, date, viewer);
+    if (b.remote) { rem = true; return; }                            // no location at all -- nothing to show a base for
     if (b.travel) {                                                  // still show where they're based, if they share it
       trav = true;
       var base = (personId !== viewer && !canSeeArea(personId, viewer)) ? '' : (b.area || tripAreaOn(personId, date) || areaOf(personId));
@@ -593,7 +595,8 @@ function placeLabelFor(personId, date, viewer){
     }
     if (pl && !seen[pl.key]) { seen[pl.key] = 1; out.push(pl.label); }
   });
-  return out.join(' / ') + (trav ? (out.length ? ', ' : '') + 'can travel' : '');
+  return out.join(' / ') + (trav ? (out.length ? ', ' : '') + 'can travel' : '')
+    + (rem ? (out.length || trav ? ', ' : '') + 'remote' : '');
 }
 // Runs of the same state, for drawing: [{s, e, lvl}]
 function segmentsFor(personId, date, viewer){
@@ -922,7 +925,7 @@ function renderDaySheet(){
   html += '<div class="sec">Your free time</div>';
   html += mine.length ? mine.map(function(b){
     return '<div class="blockrow"><span>' + fmtRange(b.start, b.end) + (b.level === 'open' ? ' <b style="font-weight:700">open</b>' : '')
-      + ' <span style="color:var(--soft)">' + audienceLabel(b) + (b.area ? ', in ' + esc(b.area) : '') + (b.travel ? ', can travel' : '') + '</span>'
+      + ' <span style="color:var(--soft)">' + audienceLabel(b) + (b.remote ? ', remote' : b.area ? ', in ' + esc(b.area) : '') + (!b.remote && b.travel ? ', can travel' : '') + '</span>'
       + (b.repeat === 'weekly' ? ' <span style="color:var(--soft)">every ' + WEEKDAYS[wdMon0(b.date)]
           + (b.repeatUntil ? ' until ' + longDate(b.repeatUntil) : ', no end date') + '</span>' : '') + '</span>'
       + (b.repeat === 'weekly' ? '<button class="btn small" data-cancel-date="' + b.id + '">Not this ' + WEEKDAYS[wdMon0(date)].slice(0, 3) + '</button>' : '')
@@ -985,11 +988,14 @@ function renderFreeForm(date){
     + '<div class="field"><label>How available</label><select id="blk-level"><option value="free">Available</option><option value="open">Open, if the right person or plan comes up</option></select></div>'
     + '<div class="row2"><div class="field"><label>From</label><select id="blk-start">' + timeOptions(18, HMIN, HMAX - 1) + '</select></div>'
     + '<div class="field"><label>To</label><select id="blk-end">' + timeOptions(21, HMIN + 1, HMAX) + '</select></div></div>'
+    + '<label class="check"><input type="checkbox" id="blk-remote"/> Remote — phone call, video chat, online game (no location needed)</label>'
+    + '<div id="blk-location-fields">'
     + '<div class="field"><label>Where you’ll be</label><select id="blk-where"><option value="">' + esc(tripAreaOn(viewerId, date) || areaOf(viewerId) || 'My area') + (tripAreaOn(viewerId, date) ? ' (trip)' : ' (home)') + '</option>'
       + '<option value="@other">Somewhere else…</option></select></div>'
     + '<div id="blk-other" style="display:none" class="field"><input type="text" id="blk-area" maxlength="60" list="blk-area-list" autocomplete="off" placeholder="Town, e.g. Nelson, BC"/>'
       + '<datalist id="blk-area-list">' + allKnownAreas().map(function(a){ return '<option value="' + esc(a) + '"></option>'; }).join('') + '</datalist></div>'
     + '<label class="check"><input type="checkbox" id="blk-travel"/> I can travel to meet (nearby towns are fine)</label>'
+    + '</div>'
     + '<div class="field"><label>Who can see this</label><select id="blk-vis"><option value="all">All my friends</option>'
       + GROUPS.map(function(g){ return '<option value="g:' + g.id + '">Just ' + esc(g.name) + '</option>'; }).join('')
       + '<option value="pick">Pick people…</option></select></div>'
@@ -1008,6 +1014,9 @@ function renderFreeForm(date){
   document.getElementById('ft-back').addEventListener('click', function(){ renderDaySheet(); });
   document.getElementById('blk-where').addEventListener('change', function(){
     document.getElementById('blk-other').style.display = this.value === '@other' ? 'block' : 'none';
+  });
+  document.getElementById('blk-remote').addEventListener('change', function(){
+    document.getElementById('blk-location-fields').style.display = this.checked ? 'none' : 'block';
   });
   document.getElementById('blk-vis').addEventListener('change', function(){
     document.getElementById('blk-pick').style.display = this.value === 'pick' ? 'block' : 'none';
@@ -1029,8 +1038,9 @@ function renderFreeForm(date){
       visibleTo = Array.from(document.querySelectorAll('.blk-who:checked')).map(function(cb){ return cb.value; });
       if (!visibleTo.length) { err.textContent = 'Pick at least one person, or choose All my friends.'; return; }
     }
+    var remote = document.getElementById('blk-remote').checked;
     var where = document.getElementById('blk-where').value, areaTxt = document.getElementById('blk-area').value.trim();
-    if (where === '@other' && !areaTxt) { err.textContent = 'Type the town, or choose your usual place.'; return; }
+    if (!remote && where === '@other' && !areaTxt) { err.textContent = 'Type the town, or choose your usual place.'; return; }
     var repeat = document.getElementById('blk-repeat').checked;
     var repeatWeeks = repeat ? document.getElementById('blk-repeat-weeks').value : '';
     days.forEach(function(d){
@@ -1039,7 +1049,9 @@ function renderFreeForm(date){
         repeat: repeat ? 'weekly' : 'none',
         repeatUntil: (repeat && repeatWeeks) ? addDaysStr(d, Number(repeatWeeks) * 7) : null,
         level: document.getElementById('blk-level').value, visibleTo: visibleTo,
-        area: where === '@other' ? areaTxt : '', travel: document.getElementById('blk-travel').checked
+        area: (!remote && where === '@other') ? areaTxt : '',
+        travel: !remote && document.getElementById('blk-travel').checked,
+        remote: remote
       });
     });
     renderDaySheet(); renderCalendar();
