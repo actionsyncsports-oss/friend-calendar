@@ -2865,10 +2865,15 @@ function renderAreaTab(card, me, tabs){
   });
   function commitArea(){
     var newName = document.getElementById('name-me').value.trim();
+    var newShare = document.getElementById('area-share').checked;
     var changed = newName !== me.name || document.getElementById('area-me').value.trim() !== me.area;
+    var shareChanged = newShare !== (me.shareArea !== false);
     if (newName) me.name = newName;
-    me.area = document.getElementById('area-me').value.trim(); me.shareArea = document.getElementById('area-share').checked;
+    me.area = document.getElementById('area-me').value.trim(); me.shareArea = newShare;
     if (changed) syncMyCoreProfile();
+    // share_area has no equivalent in ActionSync's own profiles table --
+    // it lives in friend_calendar_profiles alongside taste/avoids/colour.
+    if (shareChanged) syncMyProfile();
   }
   document.getElementById('taste-done').addEventListener('click', function(){ commitArea(); searchArea = null; closeSheet(); renderAll(); });
 }
@@ -3048,6 +3053,7 @@ function loadPeopleAndGroups(){
             if (row.color) p.color = row.color;
             p.taste = row.taste || {};
             p.avoids = row.avoids || {};
+            p.shareArea = row.share_area !== false;   // missing row (nobody's saved yet) defaults to shared, same as canSeeArea()'s own default
             (row.custom_items || []).forEach(function(c){
               if (!CATALOG.some(function(x){ return x[0] === c[0]; })) CATALOG.push(c);
             });
@@ -3074,6 +3080,7 @@ function syncMyProfile(){
     sb.from('friend_calendar_profiles').upsert({
       user_id: viewerId, color: me.color, taste: me.taste || {}, avoids: me.avoids || {},
       custom_items: CATALOG.filter(function(c){ return c[0].indexOf('c:') === 0; }),
+      share_area: me.shareArea !== false,
       updated_at: new Date().toISOString()
     }, { onConflict: 'user_id' }).then(function(r){
       if (r.error) console.warn('[friend-calendar] profile save failed:', r.error.message);
