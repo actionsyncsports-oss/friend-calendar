@@ -231,6 +231,7 @@
   <button class="btn" id="local-btn">Events and spots</button>
   <button class="btn" id="profile-btn">My profile</button>
   <button class="btn ghost" id="actionsync-sync-btn">ActionSync sync (later)</button>
+  <button class="btn ghost" id="signout-btn">Sign out</button>
 </div>
 
 <div id="filters"></div>
@@ -1130,6 +1131,14 @@ function openAddGroup(){
 
 document.getElementById('actionsync-sync-btn').addEventListener('click', function(){
   window.alert('Not built yet. Syncing with your ActionSync calendar is a planned later step — for now, this calendar lives only in this prototype.');
+});
+
+// Reload rather than hand-resetting PEOPLE/GROUPS/PLANS/THREADS/NOTIFS etc.
+// individually -- a fresh load re-runs the exact same boot path a signed-out
+// visitor already gets (AS.auth.ready() -> no session -> auth gate), so
+// there's no separate "reset" logic to keep in sync with that path.
+document.getElementById('signout-btn').addEventListener('click', function(){
+  AS.auth.signOut().then(function(){ location.reload(); });
 });
 
 /* ---------------- MESSAGES + ALERTS ---------------- */
