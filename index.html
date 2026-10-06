@@ -1121,6 +1121,14 @@ function renderPlanForm(date, start, end, whoIds, openIds, place){
     + '<div class="sec">Invite</div>'
     + (freeNow.length ? freeNow.map(function(id){ return invRow(id, true); }).join('') : '<div style="font-size:13px;color:var(--soft)">Nobody you’re counting lines up here, but you can still invite people.</div>')
     + notNow.map(function(id){ return invRow(id, false); }).join('')
+    + '<div class="field"><label>Who else can see this (not invited, just visible)</label><select id="plan-vis"><option value="invited" selected>Just the people invited</option>'
+      + '<option value="all">All my friends</option>'
+      + GROUPS.map(function(g){ return '<option value="g:' + g.id + '">Just ' + esc(g.name) + '</option>'; }).join('')
+      + '<option value="pick">Pick people…</option></select></div>'
+    + '<div id="plan-vis-pick" style="display:none;margin:-4px 0 8px">'
+      + othersOrdered().map(function(x){ return '<label class="check"><input type="checkbox" class="plan-vis-who" value="' + x.id + '"/><i class="dot" style="background:' + x.color + '"></i>' + esc(x.name) + '</label>'; }).join('')
+    + '</div>'
+    + '<div style="font-size:12px;color:var(--soft);margin:-4px 0 10px">Someone who can see it but isn’t invited can tap in to join — they’re not added until they do.</div>'
     + '<div class="form-error" id="plan-error"></div>'
     + '<button class="btn" id="plan-save" style="width:100%">Send invites</button>'
     + '<button class="btn ghost" id="plan-back" style="width:100%;margin-top:6px">Back</button>';
@@ -1159,6 +1167,9 @@ function renderPlanForm(date, start, end, whoIds, openIds, place){
   document.getElementById('plan-item').addEventListener('change', showSpots);
   document.getElementById('plan-where').addEventListener('change', showSpots);
   document.getElementById('plan-back').addEventListener('click', function(){ renderDaySheet(); });
+  document.getElementById('plan-vis').addEventListener('change', function(){
+    document.getElementById('plan-vis-pick').style.display = this.value === 'pick' ? 'block' : 'none';
+  });
   document.getElementById('plan-save').addEventListener('click', function(){
     var title = document.getElementById('plan-title').value.trim();
     var s = Number(document.getElementById('plan-start').value), e = Number(document.getElementById('plan-end').value);
@@ -1169,8 +1180,16 @@ function renderPlanForm(date, start, end, whoIds, openIds, place){
     if (!invited.length) { err.textContent = 'Invite at least one person.'; return; }
     var rsvps = {}; rsvps[viewerId] = 'going';
     invited.forEach(function(id){ rsvps[id] = 'invited'; });
+    var vis = document.getElementById('plan-vis').value, visibleTo = 'invited';
+    if (vis === 'all') visibleTo = 'all';
+    else if (vis.indexOf('g:') === 0) {
+      var vg = GROUPS.filter(function(x){ return x.id === vis.slice(2); })[0];
+      visibleTo = vg ? vg.memberIds.filter(function(id){ return id !== viewerId; }) : 'invited';
+    } else if (vis === 'pick') {
+      visibleTo = Array.from(document.querySelectorAll('.plan-vis-who:checked')).map(function(cb){ return cb.value; });
+    }
     PLANS.push({ id:newId('plan'), date:date, start:s, end:e, title:title, item: document.getElementById('plan-item').value || null, area: document.getElementById('plan-where').value.trim(),
-                 spot: document.getElementById('plan-spot').value.trim(), notes: document.getElementById('plan-notes').value.trim(), creatorId:viewerId, rsvps:rsvps });
+                 spot: document.getElementById('plan-spot').value.trim(), notes: document.getElementById('plan-notes').value.trim(), creatorId:viewerId, rsvps:rsvps, visibleTo:visibleTo });
     // The creator is auto-"going" (rsvps set above) -- they're committed
     // to this slot now, so it stops showing as free for anything else.
     consumeAvailability(viewerId, date, s, e);
@@ -1190,6 +1209,29 @@ function spotSuggestions(area, item){
     r.byKey[item].slice(0, 4).forEach(function(it){ if (out.indexOf(it.name) === -1) out.push(it.name); });
   });
   return out.slice(0, 8).map(function(n){ return String(n).slice(0, 80); });
+}
+// Separate from being invited: visibleTo is "can see this exists,"
+// rsvps is "actually invited." Someone who's just invited is always
+// visible to themselves; visibleTo widens who ELSE gets to see it --
+// a group, specific people, or everyone -- without inviting them.
+// Missing/legacy visibleTo (plans made before this existed) means
+// "only the people already invited," same as explicitly picking that.
+function canSeePlan(plan, who){
+  if (plan.rsvps[who]) return true;
+  if (!plan.visibleTo || plan.visibleTo === 'invited') return false;
+  if (plan.visibleTo === 'all') return true;
+  return Array.isArray(plan.visibleTo) && plan.visibleTo.indexOf(who) !== -1;
+}
+// Someone who could see a plan but wasn't invited taps in -- not asking
+// permission, just joining, same as the RSVP "going" path already does
+// for an invited person (consumes their availability, notifies the
+// creator -- "Jim joined your plan" rather than "Jim wants to join").
+function joinPlan(plan, who){
+  plan.rsvps[who] = 'going';
+  consumeAvailability(who, plan.date, plan.start, plan.end);
+  notify(plan.creatorId, 'rsvp', personById(who).name + ' joined: ' + plan.title, { date:plan.date });
+  var t = threadForPlan(plan);
+  if (t) { t.memberIds.push(who); t.messages.push({ id:newId('m'), from:null, sys:true, ts:nowIso(), text:personById(who).name + ' joined.' }); }
 }
 function threadForPlan(plan){ return THREADS.filter(function(t){ return t.planId === plan.id; })[0]; }
 function openPlanChat(plan){ var t = threadForPlan(plan); if (!t) return; renderThread(t.id); openSheet(); renderBadges(); }
@@ -1220,8 +1262,13 @@ function renderPlans(){
   // Each person only sees plans THEY are part of -- the same rule real
   // friends would have: you see your own invites, not everyone's.
   var mine = PLANS.filter(function(p){ return p.rsvps[viewerId]; }).sort(function(a, b){ return a.date < b.date ? -1 : a.date > b.date ? 1 : a.start - b.start; });
-  if (!mine.length) { el.innerHTML = ''; return; }
-  var html = '<h3>Plans (' + esc(personById(viewerId).name) + ')</h3>';
+  // Made visible to you but you're not actually invited -- "Jerry and
+  // Alex are doing X," shown so you can see it looks fun and join in,
+  // without it showing up as an invite you're expected to answer.
+  var seeing = PLANS.filter(function(p){ return !p.rsvps[viewerId] && canSeePlan(p, viewerId); })
+    .sort(function(a, b){ return a.date < b.date ? -1 : a.date > b.date ? 1 : a.start - b.start; });
+  if (!mine.length && !seeing.length) { el.innerHTML = ''; return; }
+  var html = mine.length ? '<h3>Plans (' + esc(personById(viewerId).name) + ')</h3>' : '';
   mine.forEach(function(p){
     var creator = personById(p.creatorId);
     var who = Object.keys(p.rsvps).map(function(id){
@@ -1241,6 +1288,18 @@ function renderPlans(){
       + (p.creatorId === viewerId ? '<button class="btn small danger" data-plan-cancel="' + p.id + '">Cancel plan</button>' : '') + '</div>';
     html += '</div>';
   });
+  if (seeing.length) {
+    html += '<h3>Friends are up to something</h3>';
+    seeing.forEach(function(p){
+      var creator = personById(p.creatorId);
+      var going = Object.keys(p.rsvps).filter(function(id){ return p.rsvps[id] === 'going'; }).map(function(id){ return esc(personById(id).name); });
+      html += '<div class="plan-card" data-plan="' + p.id + '"><div class="t">' + esc(p.title) + '</div>'
+        + '<div class="m">' + longDate(p.date) + ', ' + fmtRange(p.start, p.end) + (p.area ? ', ' + esc(p.area) : '') + '. Set up by ' + esc(creator.name) + '</div>'
+        + '<div class="m">' + going.join(', ') + '</div>'
+        + '<div class="acts"><button class="btn small" data-plan-join="' + p.id + '">I’m in</button>'
+        + '<button class="btn small ghost" data-plan-day="' + p.id + '">See the day</button></div></div>';
+    });
+  }
   el.innerHTML = html;
   function planOf(b, attr){ return PLANS.filter(function(x){ return x.id === b.getAttribute(attr); })[0]; }
   el.querySelectorAll('[data-plan-chat]').forEach(function(b){ b.addEventListener('click', function(){ openPlanChat(planOf(b, 'data-plan-chat')); }); });
@@ -1249,6 +1308,14 @@ function renderPlans(){
     if (b.dataset.sure !== '1') { b.dataset.sure = '1'; b.textContent = 'Tap again to cancel'; return; }     // one extra tap instead of a pop-up
     cancelPlan(planOf(b, 'data-plan-cancel')); renderAll();
   }); });
+  el.querySelectorAll('[data-plan-join]').forEach(function(b){
+    b.addEventListener('click', function(){
+      var plan = planOf(b, 'data-plan-join');
+      joinPlan(plan, viewerId);
+      showToast('You’re in — ' + plan.title);
+      renderCalendar(); renderPlans(); renderBadges();
+    });
+  });
   el.querySelectorAll('[data-rsvp]').forEach(function(b){
     b.addEventListener('click', function(){
       var plan = PLANS.filter(function(x){ return x.id === b.dataset.plan; })[0];
@@ -3147,8 +3214,11 @@ function seedDemoData(){
   // dimmed "not available -- booked" row instead of the normal one.
   me.blocks.push({ id:'demo-b3', date:TODAY, start:12, end:14, repeat:'none',
                     level:'free', visibleTo:'all', area:'', travel:false, remote:false, cancelledDates:[TODAY] });
+  // Visible to Sam, who isn't invited -- switch "Counting" to just Sam
+  // (or sign in as them) to see "Friends are up to something" and the
+  // "I'm in" join action.
   PLANS.push({ id:'demo-plan1', date:TODAY, start:12, end:14, title:'Lunch', item:null, area:'Rossland, BC', spot:'',
-               notes:'', creatorId:'demo-me', rsvps:{ 'demo-me':'going', 'demo-jess':'invited' } });
+               notes:'', creatorId:'demo-me', rsvps:{ 'demo-me':'going', 'demo-jess':'invited' }, visibleTo:['demo-sam'] });
 
   personById('demo-jess').blocks.push({ id:'demo-jb1', date:TODAY, start:16, end:20, repeat:'none',
                     level:'free', visibleTo:'all', area:'', travel:false, cancelledDates:[] });
