@@ -2847,6 +2847,7 @@ var profileCat = 'food';
 var profileQuery = '';
 var ALLERGY_TAB = 'avoid';
 var AREA_TAB = 'area';
+var KIDS_TAB = 'kids';
 function renderProfile(){
   renderProfileInner();
   var card = document.getElementById('sheet-card'), h = card.querySelector('h4'), me = personById(viewerId);
@@ -2860,12 +2861,14 @@ function renderProfileInner(){
   var counts = {};
   CATALOG.forEach(function(c){ if (t[c[0]]) counts[c[2]] = (counts[c[2]] || 0) + 1; });
   var nAv = Object.keys(avoidsOf(viewerId)).length;
-  var tabs = CATS.concat([[ALLERGY_TAB, 'Allergies and avoids'], [AREA_TAB, 'My area']]).map(function(c){
-    var n = c[0] === ALLERGY_TAB ? nAv : counts[c[0]];
+  var nKids = (me.kids || []).length;
+  var tabs = CATS.concat([[ALLERGY_TAB, 'Allergies and avoids'], [AREA_TAB, 'My area'], [KIDS_TAB, 'My kids']]).map(function(c){
+    var n = c[0] === ALLERGY_TAB ? nAv : c[0] === KIDS_TAB ? nKids : counts[c[0]];
     return '<button class="chip' + (c[0] === profileCat ? ' on' : '') + '" data-pcat="' + c[0] + '">' + c[1] + (n ? ' (' + n + ')' : '') + '</button>';
   }).join(' ');
   if (profileCat === ALLERGY_TAB) return renderAvoidTab(card, me, tabs);
   if (profileCat === AREA_TAB) return renderAreaTab(card, me, tabs);
+  if (profileCat === KIDS_TAB) return renderKidsTab(card, me, tabs);
   var q = profileQuery.trim().toLowerCase();
   var rows = CATALOG.filter(function(c){ return q ? c[1].toLowerCase().indexOf(q) !== -1 : c[2] === profileCat; }).map(function(c){
     var cur = t[c[0]] || 0;
@@ -2943,6 +2946,47 @@ function renderAreaTab(card, me, tabs){
     if (shareChanged) syncMyProfile();
   }
   document.getElementById('taste-done').addEventListener('click', function(){ commitArea(); searchArea = null; closeSheet(); renderAll(); });
+}
+function renderKidsTab(card, me, tabs){
+  var kids = me.kids || (me.kids = []);
+  card.innerHTML = '<h4>My kids</h4>'
+    + '<div style="margin-bottom:8px">' + tabs + '</div>'
+    + '<div style="font-size:13px;color:var(--soft);margin-bottom:6px">Add your kids so crew can plan playdates around ages, nap times, allergies, or whatever else is worth knowing.</div>'
+    + (kids.length ? kids.map(function(k){
+        return '<div class="blockrow" style="flex-direction:column;align-items:stretch;gap:6px">'
+          + '<div class="row2"><div class="field"><input type="text" class="kid-name" data-kid="' + k.id + '" maxlength="40" value="' + esc(k.name || '') + '" placeholder="Kid’s name"/></div>'
+          + '<div class="field"><input type="text" class="kid-age" data-kid="' + k.id + '" maxlength="20" value="' + esc(k.age || '') + '" placeholder="Age (e.g. 4)"/></div></div>'
+          + '<textarea class="kid-note" data-kid="' + k.id + '" maxlength="300" rows="2" style="width:100%;box-sizing:border-box;font:13px var(--sans);border:1.5px solid var(--rule);border-radius:6px;background:transparent;color:var(--ink);padding:6px" placeholder="Notes — allergies, nap time, likes...">' + esc(k.note || '') + '</textarea>'
+          + '<button class="btn small danger" data-kid-del="' + k.id + '" style="align-self:flex-start">Remove</button>'
+          + '</div>';
+      }).join('') : '<div style="font-size:13px;color:var(--soft)">No kids added yet.</div>')
+    + '<button class="btn small" id="kid-add" style="margin-top:8px">+ Add a kid</button>'
+    + '<button class="btn" id="taste-done" style="width:100%;margin-top:12px">Done</button>';
+  function commitKids(){
+    kids.forEach(function(k){
+      var n = card.querySelector('.kid-name[data-kid="' + k.id + '"]');
+      var a = card.querySelector('.kid-age[data-kid="' + k.id + '"]');
+      var note = card.querySelector('.kid-note[data-kid="' + k.id + '"]');
+      if (n) k.name = n.value.trim();
+      if (a) k.age = a.value.trim();
+      if (note) k.note = note.value.trim();
+    });
+  }
+  card.querySelectorAll('[data-pcat]').forEach(function(b){ b.addEventListener('click', function(){ commitKids(); syncMyProfile(); profileCat = b.dataset.pcat; profileQuery = ''; renderProfile(); }); });
+  card.querySelectorAll('[data-kid-del]').forEach(function(b){
+    b.addEventListener('click', function(){
+      commitKids();
+      me.kids = kids.filter(function(k){ return k.id !== b.dataset.kidDel; });
+      syncMyProfile();
+      renderProfile();
+    });
+  });
+  document.getElementById('kid-add').addEventListener('click', function(){
+    commitKids();
+    kids.push({ id:newId('kid'), name:'', age:'', note:'' });
+    renderProfile();
+  });
+  document.getElementById('taste-done').addEventListener('click', function(){ commitKids(); syncMyProfile(); closeSheet(); renderAll(); });
 }
 function renderAvoidTab(card, me, tabs){
   var a = avoidsOf(viewerId);
@@ -3120,6 +3164,7 @@ function loadPeopleAndGroups(){
             if (row.color) p.color = row.color;
             p.taste = row.taste || {};
             p.avoids = row.avoids || {};
+            p.kids = row.kids || [];
             p.shareArea = row.share_area !== false;   // missing row (nobody's saved yet) defaults to shared, same as canSeeArea()'s own default
             (row.custom_items || []).forEach(function(c){
               if (!CATALOG.some(function(x){ return x[0] === c[0]; })) CATALOG.push(c);
@@ -3147,7 +3192,7 @@ function syncMyProfile(){
     sb.from('friend_calendar_profiles').upsert({
       user_id: viewerId, color: me.color, taste: me.taste || {}, avoids: me.avoids || {},
       custom_items: CATALOG.filter(function(c){ return c[0].indexOf('c:') === 0; }),
-      share_area: me.shareArea !== false,
+      share_area: me.shareArea !== false, kids: me.kids || [],
       updated_at: new Date().toISOString()
     }, { onConflict: 'user_id' }).then(function(r){
       if (r.error) console.warn('[friend-calendar] profile save failed:', r.error.message);
@@ -3195,8 +3240,10 @@ function seedDemoData(){
 
   viewerId = 'demo-me';
   PEOPLE = [
-    { id:'demo-me', name:'Alex (demo)', color:PERSON_COLORS[0], area:'Rossland, BC', shareArea:true, blocks:[], taste:{}, avoids:{} },
-    { id:'demo-jess', name:'Jess', color:PERSON_COLORS[1], area:'Nelson, BC', shareArea:true, blocks:[] },
+    { id:'demo-me', name:'Alex (demo)', color:PERSON_COLORS[0], area:'Rossland, BC', shareArea:true, blocks:[], taste:{}, avoids:{},
+      kids:[{ id:'demo-kid-1', name:'Mia', age:'4', note:'Naps 1-3pm. No nuts.' }] },
+    { id:'demo-jess', name:'Jess', color:PERSON_COLORS[1], area:'Nelson, BC', shareArea:true, blocks:[],
+      kids:[{ id:'demo-kid-2', name:'Theo', age:'5', note:'Loves dinosaurs and the splash pad.' }] },
     { id:'demo-sam', name:'Sam', color:PERSON_COLORS[2], area:'', shareArea:true, blocks:[] }
   ];
   GROUPS = [ { id:'demo-g1', name:'Ski crew', memberIds:['demo-me', 'demo-jess', 'demo-sam'] } ];
