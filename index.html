@@ -3114,11 +3114,61 @@ function boot(){
   });
 }
 
-AS.auth.ready().then(function(state){
-  if (state.user) { boot(); return; }
-  document.getElementById('auth-gate').style.display = 'block';
-  renderAuthGate();
-});
+// ---- DEMO MODE (?demo=1) ------------------------------------------
+// Lets someone click through every new feature on their own phone,
+// right now, with no sign-in and zero real network calls -- useful for
+// showing this off before the backend SQL has even been run. Stubs
+// AS.auth entirely rather than signing in for real, so there is no way
+// this can touch the live Supabase project.
+function seedDemoData(){
+  AS.auth.client = function(){ return null; };     // every write path already no-ops without a client
+  AS.auth.user = function(){ return { id:'demo-me' }; };
+  AS.auth.profile = function(){ return { display_name:'Alex (demo)' }; };
+  AS.auth.isSignedIn = function(){ return true; };
+
+  viewerId = 'demo-me';
+  PEOPLE = [
+    { id:'demo-me', name:'Alex (demo)', color:PERSON_COLORS[0], area:'Rossland, BC', shareArea:true, blocks:[], taste:{}, avoids:{} },
+    { id:'demo-jess', name:'Jess', color:PERSON_COLORS[1], area:'Nelson, BC', shareArea:true, blocks:[] },
+    { id:'demo-sam', name:'Sam', color:PERSON_COLORS[2], area:'', shareArea:true, blocks:[] }
+  ];
+  GROUPS = [ { id:'demo-g1', name:'Ski crew', memberIds:['demo-me', 'demo-jess', 'demo-sam'] } ];
+  selectedIds = PEOPLE.map(function(p){ return p.id; });
+
+  var me = personById('demo-me');
+  // A repeating block -- try "Not this <day>" on it to cancel just today
+  // without touching the series.
+  me.blocks.push({ id:'demo-b1', date:TODAY, start:17, end:21, repeat:'weekly', repeatUntil:addDaysStr(TODAY, 84),
+                    level:'free', visibleTo:'all', area:'', travel:false, remote:false, cancelledDates:[] });
+  // A remote block, tomorrow -- matches Jess/Sam regardless of town.
+  me.blocks.push({ id:'demo-b2', date:addDaysStr(TODAY, 1), start:19, end:21, repeat:'none',
+                    level:'free', visibleTo:'all', area:'', travel:false, remote:true, cancelledDates:[] });
+  // Already booked: a plan ate part of today's block, so it shows the
+  // dimmed "not available -- booked" row instead of the normal one.
+  me.blocks.push({ id:'demo-b3', date:TODAY, start:12, end:14, repeat:'none',
+                    level:'free', visibleTo:'all', area:'', travel:false, remote:false, cancelledDates:[TODAY] });
+  PLANS.push({ id:'demo-plan1', date:TODAY, start:12, end:14, title:'Lunch', item:null, area:'Rossland, BC', spot:'',
+               notes:'', creatorId:'demo-me', rsvps:{ 'demo-me':'going', 'demo-jess':'invited' } });
+
+  personById('demo-jess').blocks.push({ id:'demo-jb1', date:TODAY, start:16, end:20, repeat:'none',
+                    level:'free', visibleTo:'all', area:'', travel:false, cancelledDates:[] });
+  personById('demo-sam').blocks.push({ id:'demo-sb1', date:addDaysStr(TODAY, 1), start:18, end:22, repeat:'none',
+                    level:'free', visibleTo:'all', area:'', travel:false, cancelledDates:[] });
+
+  document.getElementById('auth-gate').style.display = 'none';
+  renderAll();
+  showToast('Demo mode — nothing here is real or saved');
+}
+
+if (/[?&]demo=1\b/.test(location.search)) {
+  seedDemoData();
+} else {
+  AS.auth.ready().then(function(state){
+    if (state.user) { boot(); return; }
+    document.getElementById('auth-gate').style.display = 'block';
+    renderAuthGate();
+  });
+}
 </script>
 </body>
 </html>
