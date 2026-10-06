@@ -386,10 +386,14 @@ function freeList(ids, date){
     return { p:personById(id), me: id === viewerId, open: hourStates(id, date).every(function(v){ return v < 2; }) };
   });
 }
-// Resize a chosen image to a small square JPEG (kept in memory only in this prototype).
+// Resize a chosen image to a small square JPEG, held locally until
+// uploadMyAvatar() swaps it for the real hosted URL -- so this has to
+// accept both a fresh data: URI (right after picking a photo) and a
+// real https Storage URL (once the upload lands), same two shapes
+// safePhotoUrl() already validates for display.
 function setPhoto(personId, dataUrl){
   var p = personById(personId); if (!p) return false;
-  if (dataUrl && !/^data:image\/(jpeg|png|webp);base64,/.test(dataUrl)) return false;
+  if (dataUrl && !safePhotoUrl(dataUrl)) return false;
   p.photo = dataUrl || '';
   return true;
 }
@@ -421,6 +425,30 @@ function photoRowHtml(me){
       }).join('') + '</div>'
     + '<div class="form-error" id="photo-err"></div></div></div>';
 }
+// Uploads to the SAME 'avatars' bucket + profiles.photo_url column
+// actionsync-profile-Pv03.00.00.html's own uploadAvatarToServer()
+// already uses -- same account, same photo, so a photo set here shows
+// up in ActionSync too, not a parallel copy that can drift.
+function uploadMyAvatar(dataUrl){
+  if (!(window.AS && AS.auth)) return Promise.resolve(null);
+  var sb = AS.auth.client();
+  if (!sb) return Promise.resolve(null);
+  return fetch(dataUrl).then(function(r){ return r.blob(); }).then(function(blob){
+    var path = viewerId + '/avatar.jpg';
+    return sb.storage.from('avatars').upload(path, blob, { contentType:'image/jpeg', upsert:true })
+      .then(function(up){
+        if (up.error) { console.warn('[friend-calendar] avatar upload failed:', up.error.message); return null; }
+        var pub = sb.storage.from('avatars').getPublicUrl(path);
+        var url = pub && pub.data && pub.data.publicUrl;
+        if (!url) return null;
+        url += '?v=' + Date.now();   // path never changes, so bust any cached copy
+        return sb.from('profiles').update({ photo_url:url }).eq('id', viewerId).then(function(res){
+          if (res.error) { console.warn('[friend-calendar] photo_url save failed:', res.error.message); return null; }
+          return url;
+        });
+      });
+  }).catch(function(e){ console.warn('[friend-calendar] avatar upload failed:', e && e.message); return null; });
+}
 function bindPhotoRow(card, redraw){
   var pick = card.querySelector('#photo-pick'), file = card.querySelector('#photo-file');
   if (!pick) return;
@@ -428,11 +456,22 @@ function bindPhotoRow(card, redraw){
   file.addEventListener('change', function(){
     photoFromFile(file.files[0], function(url, err){
       if (err) { card.querySelector('#photo-err').textContent = err; return; }
-      setPhoto(viewerId, url); redraw(); renderAll();
+      setPhoto(viewerId, url); redraw(); renderAll();         // local-first: instant feedback
+      uploadMyAvatar(url).then(function(realUrl){
+        if (realUrl) { setPhoto(viewerId, realUrl); if (document.getElementById('sheet-card').contains(card)) { redraw(); renderAll(); } }
+        else showToast('Photo saved on this device — upload to the server failed');
+      });
     });
   });
   var clr = card.querySelector('#photo-clear');
-  if (clr) clr.addEventListener('click', function(){ setPhoto(viewerId, ''); redraw(); renderAll(); });
+  if (clr) clr.addEventListener('click', function(){
+    setPhoto(viewerId, ''); redraw(); renderAll();
+    if (window.AS && AS.auth) {
+      var sb = AS.auth.client();
+      if (sb) sb.from('profiles').update({ photo_url:null }).eq('id', viewerId)
+        .then(function(res){ if (res.error) console.warn('[friend-calendar] photo clear failed:', res.error.message); });
+    }
+  });
   card.querySelectorAll('[data-color]').forEach(function(b){
     b.addEventListener('click', function(){ personById(viewerId).color = b.dataset.color; syncMyProfile(); redraw(); renderAll(); });
   });
