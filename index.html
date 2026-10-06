@@ -232,6 +232,7 @@
   <button class="btn" id="msg-btn">Messages</button>
   <button class="btn" id="notif-btn">Alerts</button>
   <button class="btn" id="local-btn">Events and spots</button>
+  <button class="btn" id="playdates-btn">Playdates</button>
   <button class="btn" id="profile-btn">My profile</button>
   <button class="btn ghost" id="actionsync-sync-btn">ActionSync sync (later)</button>
   <button class="btn ghost" id="signout-btn">Sign out</button>
@@ -3028,6 +3029,64 @@ function renderAvoidTab(card, me, tabs){
 }
 document.getElementById('profile-btn').addEventListener('click', function(){ renderProfile(); openSheet(); });
 
+/* ---------------- PLAYDATE MATCHING ---------------- */
+// Crew who've also listed kids, with the next days you're both free --
+// reuses the same pairwise overlap dayAnalysis() already finds for the
+// day sheet, just run ahead across the next couple of weeks instead of
+// for one day, and limited to crew with kids on both sides.
+var PLAYDATE_DAYS = 14, PLAYDATE_PER_FRIEND = 3;
+function playdateMatches(){
+  var me = personById(viewerId);
+  if (!me || !(me.kids || []).length) return [];
+  return othersOrdered().filter(function(p){ return (p.kids || []).length; }).map(function(p){
+    var days = [];
+    for (var i = 0; i < PLAYDATE_DAYS && days.length < PLAYDATE_PER_FRIEND; i++) {
+      var date = addDaysStr(TODAY, i);
+      var an = dayAnalysis(date, [viewerId, p.id], viewerId);
+      if (an.best.size === 2) days.push({ date:date, start:an.best.start, end:an.best.end, area:an.best.area });
+    }
+    return { person:p, days:days };
+  }).filter(function(x){ return x.days.length; });
+}
+function kidsLine(p){ return (p.kids || []).map(function(k){ return esc(k.name || 'Kid') + (k.age ? ' (' + esc(k.age) + ')' : ''); }).join(', '); }
+function renderPlaydates(){
+  var card = document.getElementById('sheet-card');
+  var me = personById(viewerId);
+  if (!(me.kids || []).length) {
+    card.innerHTML = '<h4>Playdates</h4>'
+      + '<div style="font-size:13px;color:var(--soft);margin-bottom:12px">Add your kids in your profile first, then you’ll see upcoming days you and a friend with kids are both free.</div>'
+      + '<button class="btn" id="pd-add-kids" style="width:100%">Add my kids</button>'
+      + '<button class="btn ghost" id="sheet-close" style="width:100%;margin-top:6px">Close</button>';
+    document.getElementById('pd-add-kids').addEventListener('click', function(){ profileCat = KIDS_TAB; renderProfile(); });
+    document.getElementById('sheet-close').addEventListener('click', closeSheet);
+    return;
+  }
+  var matches = playdateMatches(), flat = [];
+  var html = '<h4>Playdate matches</h4>'
+    + '<div style="font-size:13px;color:var(--soft);margin-bottom:10px">Crew with kids, and the next days you’re both free.</div>';
+  html += matches.length ? matches.map(function(m){
+    return '<div class="sec">' + avatarHtml(m.person, 16) + ' ' + esc(m.person.name) + '</div>'
+      + '<div style="font-size:12px;color:var(--soft);margin:-2px 0 6px">' + kidsLine(m.person) + '</div>'
+      + m.days.map(function(d){
+          var idx = flat.push({ pid:m.person.id, kids:kidsLine(m.person), date:d.date, start:d.start, end:d.end, area:d.area }) - 1;
+          return '<div class="blockrow"><span>' + longDate(d.date) + ', ' + fmtRange(d.start, d.end) + (d.area ? ' in ' + esc(d.area) : '') + '</span>'
+            + '<button class="btn small" data-pd-plan="' + idx + '">Plan it</button></div>';
+        }).join('');
+  }).join('') : '<div style="font-size:13px;color:var(--soft)">None of your crew have added kids yet, or nothing lines up in the next two weeks.</div>';
+  html += '<button class="btn ghost" id="sheet-close" style="width:100%;margin-top:14px">Close</button>';
+  card.innerHTML = html;
+  document.getElementById('sheet-close').addEventListener('click', closeSheet);
+  card.querySelectorAll('[data-pd-plan]').forEach(function(b){
+    b.addEventListener('click', function(){
+      var m = flat[Number(b.dataset.pdPlan)];
+      openDate = m.date; searchArea = null;
+      renderPlanForm(m.date, m.start, m.end, [m.pid], [], m.area || '');
+      document.getElementById('plan-title').value = 'Playdate with ' + m.kids.replace(/\s*\([^)]*\)/g, '');
+    });
+  });
+}
+document.getElementById('playdates-btn').addEventListener('click', function(){ renderPlaydates(); openSheet(); });
+
 /* ---------------- BOOT ---------------- */
 // ONE function re-renders everything that depends on who's viewing or
 // who's counted -- so a change to either can't leave the filter chips,
@@ -3271,6 +3330,12 @@ function seedDemoData(){
                     level:'free', visibleTo:'all', area:'', travel:false, cancelledDates:[] });
   personById('demo-sam').blocks.push({ id:'demo-sb1', date:addDaysStr(TODAY, 1), start:18, end:22, repeat:'none',
                     level:'free', visibleTo:'all', area:'', travel:false, cancelledDates:[] });
+  // A playdate match -- same town, overlapping, a few days out. Both
+  // Alex and Jess have kids listed above; open "Playdates" to see it.
+  me.blocks.push({ id:'demo-b4', date:addDaysStr(TODAY, 3), start:10, end:12, repeat:'none',
+                    level:'free', visibleTo:'all', area:'Rossland, BC', travel:false, remote:false, cancelledDates:[] });
+  personById('demo-jess').blocks.push({ id:'demo-jb2', date:addDaysStr(TODAY, 3), start:10, end:13, repeat:'none',
+                    level:'free', visibleTo:'all', area:'Rossland, BC', travel:false, cancelledDates:[] });
 
   document.getElementById('auth-gate').style.display = 'none';
   renderAll();
