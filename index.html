@@ -422,7 +422,7 @@ function bindPhotoRow(card, redraw){
   var clr = card.querySelector('#photo-clear');
   if (clr) clr.addEventListener('click', function(){ setPhoto(viewerId, ''); redraw(); renderAll(); });
   card.querySelectorAll('[data-color]').forEach(function(b){
-    b.addEventListener('click', function(){ personById(viewerId).color = b.dataset.color; redraw(); renderAll(); });
+    b.addEventListener('click', function(){ personById(viewerId).color = b.dataset.color; syncMyProfile(); redraw(); renderAll(); });
   });
 }
 
@@ -2565,7 +2565,7 @@ function renderProfileInner(){
   var pf = document.getElementById('pf-search');
   pf.addEventListener('input', function(){ profileQuery = pf.value; renderProfile(); var n = document.getElementById('pf-search'); n.focus(); n.setSelectionRange(n.value.length, n.value.length); });
   card.querySelectorAll('[data-rate]').forEach(function(b){
-    b.addEventListener('click', function(){ rate(viewerId, b.dataset.rate, Number(b.dataset.lvl)); renderProfile(); });
+    b.addEventListener('click', function(){ rate(viewerId, b.dataset.rate, Number(b.dataset.lvl)); syncMyProfile(); renderProfile(); });
   });
   document.getElementById('cust-add').addEventListener('click', function(){
     var cat = document.getElementById('cust-cat').value;
@@ -2573,6 +2573,7 @@ function renderProfileInner(){
     if (!key) return;
     profileCat = catItem(key)[2];
     if (!taste(viewerId)[key]) taste(viewerId)[key] = 1;   // new items start as a "like"; change it with the buttons
+    syncMyProfile();
     renderProfile();
   });
   document.getElementById('taste-done').addEventListener('click', function(){ closeSheet(); renderAll(); });
@@ -2581,6 +2582,7 @@ function renderProfileInner(){
 function renderAreaTab(card, me, tabs){
   card.innerHTML = '<h4>My profile</h4>'
     + '<div style="margin-bottom:8px">' + tabs + '</div>'
+    + '<div class="field"><label>Your name</label><input type="text" id="name-me" maxlength="60" value="' + esc(me.name || '') + '" placeholder="Your name"/></div>'
     + '<div class="field"><label>Where you are (town or neighbourhood)</label><input type="text" id="area-me" maxlength="60" value="' + esc(me.area || '') + '" placeholder="e.g. Rossland, BC"/></div>'
     + '<label class="check"><input type="checkbox" id="area-share"' + (me.shareArea !== false ? ' checked' : '') + '/> Friends can see my area</label>'
     + '<div class="sec">Trips and travel</div>'
@@ -2606,7 +2608,13 @@ function renderAreaTab(card, me, tabs){
     tripsOf(me.id).push({ id:newId('trip'), area:ar, start:st, end:en });
     renderProfile();
   });
-  function commitArea(){ me.area = document.getElementById('area-me').value.trim(); me.shareArea = document.getElementById('area-share').checked; }
+  function commitArea(){
+    var newName = document.getElementById('name-me').value.trim();
+    var changed = newName !== me.name || document.getElementById('area-me').value.trim() !== me.area;
+    if (newName) me.name = newName;
+    me.area = document.getElementById('area-me').value.trim(); me.shareArea = document.getElementById('area-share').checked;
+    if (changed) syncMyCoreProfile();
+  }
   document.getElementById('taste-done').addEventListener('click', function(){ commitArea(); searchArea = null; closeSheet(); renderAll(); });
 }
 function renderAvoidTab(card, me, tabs){
@@ -2640,10 +2648,10 @@ function renderAvoidTab(card, me, tabs){
     + '<button class="btn" id="taste-done" style="width:100%;margin-top:12px">Done</button>';
   card.querySelectorAll('[data-pcat]').forEach(function(b){ b.addEventListener('click', function(){ profileCat = b.dataset.pcat; profileQuery = ''; renderProfile(); }); });
   card.querySelectorAll('[data-av]').forEach(function(b){
-    b.addEventListener('click', function(){ setAvoid(viewerId, b.dataset.av, b.dataset.label, b.dataset.sev); renderProfile(); });
+    b.addEventListener('click', function(){ setAvoid(viewerId, b.dataset.av, b.dataset.label, b.dataset.sev); syncMyProfile(); renderProfile(); });
   });
   document.getElementById('av-add').addEventListener('click', function(){
-    if (addCustomAvoid(viewerId, document.getElementById('av-name').value, document.getElementById('av-sev').value)) renderProfile();
+    if (addCustomAvoid(viewerId, document.getElementById('av-name').value, document.getElementById('av-sev').value)) { syncMyProfile(); renderProfile(); }
   });
   document.getElementById('taste-done').addEventListener('click', function(){ closeSheet(); renderAll(); });
 }
@@ -2751,7 +2759,8 @@ function loadPeopleAndGroups(){
   // Set before either network call so the page never has a null viewer
   // or empty PEOPLE even if crew/groups fail to load.
   var myPerson = { id:user.id, name:nameOfProfile(prof) || 'Me', color:PERSON_COLORS[0],
-                    photo:(prof && prof.photo_url) || '', simulated:false, blocks:[] };
+                    photo:(prof && prof.photo_url) || '', area:(prof && prof.location) || '',
+                    simulated:false, blocks:[] };
   PEOPLE = [myPerson];
   viewerId = user.id;
   selectedIds = [user.id];
@@ -2760,19 +2769,79 @@ function loadPeopleAndGroups(){
     .then(function(cr){
       var ids = (cr.data || []).map(function(r){ return r.member_id; });
       if (!ids.length) return [];
-      return sb.from('profiles').select('id,name,display_name,first_name,last_name,photo_url')
+      return sb.from('profiles').select('id,name,display_name,first_name,last_name,photo_url,location')
         .in('id', ids).then(function(pr){ return pr.data || []; });
     })
     .then(function(crewRows){
       crewRows.forEach(function(row, i){
         PEOPLE.push({ id:row.id, name:nameOfProfile(row), color:PERSON_COLORS[(i + 1) % PERSON_COLORS.length],
-                      photo:row.photo_url || '', simulated:false, blocks:[] });
+                      photo:row.photo_url || '', area:row.location || '', simulated:false, blocks:[] });
       });
       selectedIds = PEOPLE.map(function(p){ return p.id; });
     })
     .catch(function(e){ console.warn('[friend-calendar] crew load failed:', e && e.message); })
+    // Taste/avoids/colour/custom items have no home in ActionSync's own
+    // profiles table -- friend_calendar_profiles, self+crew (fc_profiles_read),
+    // merged onto the PEOPLE entries just built above.
+    .then(function(){
+      var ids = PEOPLE.map(function(p){ return p.id; });
+      return sb.from('friend_calendar_profiles').select('*').in('user_id', ids)
+        .then(function(fr){
+          (fr.data || []).forEach(function(row){
+            var p = personById(row.user_id);
+            if (!p) return;
+            if (row.color) p.color = row.color;
+            p.taste = row.taste || {};
+            p.avoids = row.avoids || {};
+            (row.custom_items || []).forEach(function(c){
+              if (!CATALOG.some(function(x){ return x[0] === c[0]; })) CATALOG.push(c);
+            });
+          });
+        });
+    })
+    .catch(function(e){ console.warn('[friend-calendar] profile data load failed:', e && e.message); })
     .then(function(){ return loadGroups(sb, user.id); })
     .catch(function(e){ console.warn('[friend-calendar] groups load failed:', e && e.message); });
+}
+
+// ---- Persisting profile edits -------------------------------------
+// Local-first (every caller already mutated the in-memory object before
+// calling this), synced right after -- same pattern syncPrivacy() uses
+// in the main ActionSync app. Debounced so rapid taps (rating several
+// items in a row) don't fire a request per tap.
+var _fcSyncTimer = null;
+function syncMyProfile(){
+  clearTimeout(_fcSyncTimer);
+  _fcSyncTimer = setTimeout(function(){
+    if (!(window.AS && AS.auth)) return;
+    var sb = AS.auth.client(), me = personById(viewerId);
+    if (!sb || !me) return;
+    sb.from('friend_calendar_profiles').upsert({
+      user_id: viewerId, color: me.color, taste: me.taste || {}, avoids: me.avoids || {},
+      custom_items: CATALOG.filter(function(c){ return c[0].indexOf('c:') === 0; }),
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'user_id' }).then(function(r){
+      if (r.error) console.warn('[friend-calendar] profile save failed:', r.error.message);
+    });
+  }, 600);
+}
+
+// Name + area are real ActionSync profile fields (display_name,
+// location) -- editing them here edits the same account everywhere,
+// which is correct given Friend Calendar and ActionSync are the same
+// identity, not a coincidence to work around.
+var _fcCoreSyncTimer = null;
+function syncMyCoreProfile(){
+  clearTimeout(_fcCoreSyncTimer);
+  _fcCoreSyncTimer = setTimeout(function(){
+    if (!(window.AS && AS.auth)) return;
+    var sb = AS.auth.client(), me = personById(viewerId);
+    if (!sb || !me) return;
+    sb.from('profiles').update({ display_name: me.name, location: me.area || null })
+      .eq('id', viewerId).then(function(r){
+        if (r.error) console.warn('[friend-calendar] name/area save failed:', r.error.message);
+      });
+  }, 600);
 }
 
 function boot(){
