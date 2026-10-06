@@ -22,7 +22,6 @@
   #topbar{display:flex;align-items:baseline;gap:14px;padding:18px 18px 6px;flex-wrap:wrap}
   #topbar b{font:400 22px var(--serif);margin-right:auto}
   #topbar select{padding:2px 4px;border:none;border-bottom:1.5px solid var(--ink);background:transparent;font:700 14px var(--sans);color:var(--ink);border-radius:0}
-  .viewas{font-size:13px;color:var(--soft);display:flex;align-items:baseline;gap:6px}
 
   .btn{background:var(--ink);color:var(--paper);border:none;border-radius:999px;padding:8px 16px;font:700 13px var(--sans);cursor:pointer}
   .btn.ghost{background:transparent;color:var(--accent);padding:8px 6px}
@@ -217,9 +216,16 @@
 </head>
 <body>
 
+<div id="auth-gate" style="display:none;position:fixed;inset:0;background:var(--paper);z-index:100;overflow-y:auto;padding:48px 20px;">
+  <div style="max-width:360px;margin:0 auto;">
+    <h2 style="font:400 26px var(--serif);margin:0 0 4px;">Friend Calendar</h2>
+    <div style="color:var(--soft);font-size:13px;margin-bottom:20px;">Sign in with your ActionSync account &mdash; your crew and groups come from there.</div>
+    <div id="auth-gate-body"></div>
+  </div>
+</div>
+
 <div id="topbar">
   <b>Friend Calendar</b>
-  <label class="viewas">Viewing as <select id="viewas"></select></label>
   <button class="btn" id="msg-btn">Messages</button>
   <button class="btn" id="notif-btn">Alerts</button>
   <button class="btn" id="local-btn">Events and spots</button>
@@ -248,10 +254,11 @@
 
 <div id="plans"></div>
 
-<div id="disclaimer">Blank start: nothing is prefilled. Add friends and groups, then use &ldquo;Viewing as&rdquo; to fill in and see their side. Real phones need a backend that isn&rsquo;t built yet.</div>
+<div id="disclaimer">Your crew and groups come from ActionSync. Free time, plans and messages are still local to this device &mdash; syncing those is next.</div>
 
 <div class="sheet-bg" id="sheet-bg"><div class="sheet-card" id="sheet-card"></div></div>
 
+<script src="actionsync-auth.js"></script>
 <script>
 /* ==================================================================
  * FRIEND CALENDAR — prototype #2 (replaces the weekly-grid v1).
@@ -291,6 +298,19 @@ function hourLabel(h){ if (h === 24 || h === 0) return '12am'; if (h === 12) ret
 function fmtRange(s, e){ return hourLabel(s) + '–' + hourLabel(e); }
 function longDate(s){ var d = parseDate(s); return WEEKDAYS[wdMon0(s)] + ', ' + MONTHS[d.getMonth()].slice(0,3) + ' ' + d.getDate(); }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+// A real profile photo is a Storage https URL, not a data: URI -- this page's
+// own upload path (setPhoto below) only ever produces data:image URIs, so
+// that's still checked strictly there. Display has to accept both. Same
+// protocol check actionsync-lightbox.js's safeImg() uses: http(s) or
+// data:image, nothing else (never javascript: or any other scheme).
+function safePhotoUrl(u){
+  if (!u) return null;
+  if (/^data:image\/(jpeg|png|webp);base64,/.test(u)) return u;
+  try{
+    var p = new URL(u, location.origin);
+    return (p.protocol === 'http:' || p.protocol === 'https:') ? p.href : null;
+  }catch(e){ return null; }
+}
 var uid = 0;
 function newId(p){ return p + '_' + (++uid); }
 
@@ -322,9 +342,9 @@ function seedPattern(name){
   return seed(out);
 }
 
-var PEOPLE = [
-  { id:'me', name:'Me', color:'#1c5fae', simulated:false, blocks: [] }
-];
+// Populated from the real signed-in account + their ActionSync crew once
+// loadPeopleAndGroups() runs (see BOOT) -- nothing is seeded here anymore.
+var PEOPLE = [];
 var GROUPS = [];
 var PLANS = [];   // { id, date, start, end, title, notes, creatorId, rsvps:{personId:'going'|'maybe'|'no'|'invited'} }
 
@@ -336,7 +356,7 @@ function initialOf(p){ return String(p.name || '?').trim().charAt(0).toUpperCase
 // size = px; opts.open = dashed ring; opts.me = dark outline
 function avatarHtml(p, size, opts){
   opts = opts || {};
-  var photo = p.photo && /^data:image\/(jpeg|png|webp);base64,/.test(p.photo) ? p.photo : '';
+  var photo = safePhotoUrl(p.photo) || '';
   return '<span class="av' + (opts.open ? ' open' : '') + (opts.me ? ' me' : '') + '" title="' + esc(p.name) + (opts.open ? ' (open)' : '') + '" style="--c:' + esc(p.color) + (size ? ';--s:' + size + 'px' : '') + (photo ? ';background-image:url(' + photo + ')' : '') + '">' + (photo ? '' : esc(initialOf(p))) + '</span>';
 }
 // Up to 9 circles; if more people than that, 8 circles and a "+N" circle.
@@ -406,8 +426,8 @@ function bindPhotoRow(card, redraw){
 }
 
 /* ---------------- STATE ---------------- */
-var viewerId = 'me';
-var selectedIds = PEOPLE.map(function(p){ return p.id; });   // who's counted when looking for overlap
+var viewerId = null;      // set once, to the real signed-in user's id, in loadPeopleAndGroups()
+var selectedIds = [];     // who's counted when looking for overlap -- filled in alongside viewerId
 var viewYear = new Date().getFullYear(), viewMonth = new Date().getMonth();
 var openDate = null;
 var viewMode = 'month';          // 'month' | 'week'
@@ -596,16 +616,8 @@ function dayAnalysis(date, ids, viewer){
 }
 
 /* ---------------- TOP BAR + FILTER CHIPS ---------------- */
-function renderViewAs(){
-  var sel = document.getElementById('viewas');
-  sel.innerHTML = PEOPLE.map(function(p){
-    return '<option value="' + p.id + '"' + (p.id === viewerId ? ' selected' : '') + '>' + esc(p.name) + '</option>';
-  }).join('');
-}
-document.getElementById('viewas').addEventListener('change', function(){
-  viewerId = this.value;
-  renderAll();
-});
+// "Viewing as" (simulating any person on one device) is gone -- viewerId
+// is now always the real signed-in user, set once in loadPeopleAndGroups().
 
 function sameSet(a, b){ return a.length === b.length && a.every(function(x){ return b.indexOf(x) !== -1; }); }
 function renderFilters(){
@@ -824,7 +836,7 @@ function renderDaySheet(){
 
   // --- the viewer's own blocks for this day, and a way to add one ---
   var mine = viewer.blocks.filter(function(b){ return blockApplies(b, date); });
-  html += '<div class="sec">' + (viewerId === 'me' ? 'Your' : esc(viewer.name) + '’s (editing as ' + esc(viewer.name) + ')') + ' free time</div>';
+  html += '<div class="sec">Your free time</div>';
   html += mine.length ? mine.map(function(b){
     return '<div class="blockrow"><span>' + fmtRange(b.start, b.end) + (b.level === 'open' ? ' <b style="font-weight:700">open</b>' : '')
       + ' <span style="color:var(--soft)">' + audienceLabel(b) + (b.area ? ', in ' + esc(b.area) : '') + (b.travel ? ', can travel' : '') + '</span>'
@@ -1062,39 +1074,25 @@ function renderPlans(){
 }
 
 /* ---------------- ADD FRIEND / ADD GROUP ---------------- */
+// Friends are real ActionSync crew now -- this page has no way (and no
+// business) fabricating a person. Point back at the real add-crew flow
+// instead of a fake "create a person" form.
 function openAddFriend(){
   var card = document.getElementById('sheet-card');
   card.innerHTML = '<h4>Add a friend</h4>'
-    + '<div class="field"><label>Name</label><input type="text" id="fr-name"/></div>'
-    + '<div class="field"><label>Typical free time</label><select id="fr-pattern">'
-      + '<option value="">None yet (I\'ll add it)</option>'
-      + '<option value="weekday-evenings">Weekday evenings + weekends</option>'
-      + '<option value="freelancer">Flexible days (noon on) + weekends</option>'
-      + '<option value="weekend-only">Weekends only</option>'
-      + '<option value="early-bird">Early mornings + early evenings</option>'
-    + '</select></div>'
-    + '<div class="form-error" id="fr-error"></div>'
-    + '<button class="btn" id="fr-save" style="width:100%">Add</button>'
-    + '<button class="btn ghost" id="fr-cancel" style="width:100%;margin-top:6px">Cancel</button>';
+    + '<div style="font-size:14px;line-height:1.6;color:var(--soft);">Friends here are your ActionSync crew. '
+    + 'Add them in ActionSync (share or scan a crew code) and they’ll show up here next time you open this page.</div>'
+    + '<button class="btn ghost" id="fr-cancel" style="width:100%;margin-top:14px">Close</button>';
   openSheet();
   document.getElementById('fr-cancel').addEventListener('click', closeSheet);
-  document.getElementById('fr-save').addEventListener('click', function(){
-    var name = document.getElementById('fr-name').value.trim();
-    if (!name) { document.getElementById('fr-error').textContent = 'Needs a name.'; return; }
-    var pattern = document.getElementById('fr-pattern').value;
-    var palette = PERSON_COLORS.slice(5).concat(PERSON_COLORS.slice(0, 5));
-    var p = { id:newId('p'), name:name, color:palette[PEOPLE.length % palette.length], simulated:true, blocks: pattern ? seedPattern(pattern) : [] };
-    PEOPLE.push(p);
-    selectedIds.push(p.id);
-    closeSheet(); renderAll();
-  });
 }
 function openAddGroup(){
   var card = document.getElementById('sheet-card');
   card.innerHTML = '<h4>New group</h4>'
     + '<div class="field"><label>Group name</label><input type="text" id="gr-name" placeholder="e.g. Ski crew"/></div>'
     + '<div class="sec">Members</div>'
-    + PEOPLE.map(function(p){ return '<label class="check"><input type="checkbox" class="gr-member" value="' + p.id + '"/>' + esc(p.name) + '</label>'; }).join('')
+    + PEOPLE.filter(function(p){ return p.id !== viewerId; })
+        .map(function(p){ return '<label class="check"><input type="checkbox" class="gr-member" value="' + p.id + '"/>' + esc(p.name) + '</label>'; }).join('')
     + '<div class="form-error" id="gr-error"></div>'
     + '<button class="btn" id="gr-save" style="width:100%">Create</button>'
     + '<button class="btn ghost" id="gr-cancel" style="width:100%;margin-top:6px">Cancel</button>';
@@ -1102,11 +1100,31 @@ function openAddGroup(){
   document.getElementById('gr-cancel').addEventListener('click', closeSheet);
   document.getElementById('gr-save').addEventListener('click', function(){
     var name = document.getElementById('gr-name').value.trim();
-    if (!name) { document.getElementById('gr-error').textContent = 'Needs a name.'; return; }
+    var err = document.getElementById('gr-error');
+    if (!name) { err.textContent = 'Needs a name.'; return; }
     var memberIds = Array.from(document.querySelectorAll('.gr-member:checked')).map(function(cb){ return cb.value; });
-    if (!memberIds.length) { document.getElementById('gr-error').textContent = 'Pick at least one person.'; return; }
-    var ng = { id:newId('g'), name:name, memberIds:memberIds }; GROUPS.push(ng); ensureGroupThread(ng);
-    closeSheet(); renderAll();
+    if (!memberIds.length) { err.textContent = 'Pick at least one person.'; return; }
+    var btn = document.getElementById('gr-save');
+    btn.disabled = true; btn.textContent = 'Creating…';
+    var sb = AS.auth.client();
+    // Real crew_groups row + membership rows -- same shape
+    // actionsync-crew.js's own createGroup() writes.
+    sb.from('crew_groups').insert({ owner_id:viewerId, name:name }).select().single()
+      .then(function(r){
+        if (r.error) throw r.error;
+        return sb.from('crew_group_members')
+          .insert(memberIds.map(function(id){ return { group_id:r.data.id, member_id:id }; }))
+          .then(function(mr){ if (mr.error) throw mr.error; return r.data; });
+      })
+      .then(function(row){
+        var ng = { id:row.id, name:row.name, memberIds:[viewerId].concat(memberIds) };
+        GROUPS.push(ng); ensureGroupThread(ng);
+        closeSheet(); renderAll();
+      })
+      .catch(function(e){
+        btn.disabled = false; btn.textContent = 'Create';
+        err.textContent = 'Could not create group: ' + (e && e.message);
+      });
   });
 }
 
@@ -2477,7 +2495,7 @@ function renderProfileInner(){
           return '<button class="lvbtn' + (cur === l[0] ? ' on l' + (l[0] < 0 ? 'n' : 'p') + Math.abs(l[0]) : '') + '" title="' + l[2] + '" data-rate="' + c[0] + '" data-lvl="' + l[0] + '">' + l[1] + '</button>';
         }).join('') + '</span></div>';
   }).join('');
-  card.innerHTML = '<h4>' + (viewerId === 'me' ? 'My' : esc(me.name) + '’s') + ' likes and dislikes</h4>'
+  card.innerHTML = '<h4>My likes and dislikes</h4>'
     + '<div style="font-size:12px;color:var(--soft);margin-bottom:8px">Rate what you like. Tap a rating again to clear it. Anything unrated counts as no opinion.</div>'
     + '<div class="field"><input type="text" id="pf-search" placeholder="Search all ' + CATALOG.length + ' items" value="' + esc(profileQuery) + '"/></div>'
     + '<div style="margin-bottom:8px">' + tabs + '</div>' + (rows || '<div style="color:var(--soft);font-size:14px;padding:8px 0">Nothing matches. Add it below.</div>')
@@ -2504,7 +2522,7 @@ function renderProfileInner(){
 }
 
 function renderAreaTab(card, me, tabs){
-  card.innerHTML = '<h4>' + (viewerId === 'me' ? 'My' : esc(me.name) + '’s') + ' profile</h4>'
+  card.innerHTML = '<h4>My profile</h4>'
     + '<div style="margin-bottom:8px">' + tabs + '</div>'
     + '<div class="field"><label>Where you are (town or neighbourhood)</label><input type="text" id="area-me" maxlength="60" value="' + esc(me.area || '') + '" placeholder="e.g. Rossland, BC"/></div>'
     + '<label class="check"><input type="checkbox" id="area-share"' + (me.shareArea !== false ? ' checked' : '') + '/> Friends can see my area</label>'
@@ -2544,7 +2562,7 @@ function renderAvoidTab(card, me, tabs){
         }).join('') + '</span></div>';
   }
   var custom = Object.keys(a).filter(function(k){ return k.indexOf('x:') === 0; });
-  card.innerHTML = '<h4>' + (viewerId === 'me' ? 'My' : esc(me.name) + '’s') + ' likes and dislikes</h4>'
+  card.innerHTML = '<h4>My likes and dislikes</h4>'
     + '<div style="margin-bottom:8px">' + tabs + '</div>'
     + '<div style="font-size:13px;color:var(--soft)">Anything listed here steers suggestions away from it. Allergies are kept out of suggestions entirely.</div>'
     + '<div class="sec">Allergies and intolerances</div>'
@@ -2579,13 +2597,137 @@ document.getElementById('profile-btn').addEventListener('click', function(){ ren
 // who's counted -- so a change to either can't leave the filter chips,
 // the month grid, and the plans list disagreeing about the same state.
 function renderAll(){
-  renderViewAs();
   renderFilters();
   renderCalendar();
   renderPlans();
   renderBadges();
 }
-renderAll();
+
+/* ---------------- AUTH GATE + REAL CREW/GROUPS ----------------
+ * People and groups are no longer simulated: PEOPLE is the signed-in
+ * ActionSync account plus their accepted crew, and GROUPS is their real
+ * crew_groups (owned or belonged to). Availability blocks, plans, events,
+ * sources, messages and notifications are still local/in-memory -- see
+ * the plan this shipped from for why that's a deliberate next step, not
+ * an oversight.
+ * ---------------------------------------------------------------- */
+var _authMode = 'signin';   // 'signin' | 'signup'
+
+function renderAuthGate(){
+  var body = document.getElementById('auth-gate-body');
+  var isSignup = _authMode === 'signup';
+  body.innerHTML =
+      '<div class="field"><label>Email</label><input type="text" id="auth-email"/></div>'
+    + '<div class="field"><label>Password</label><input type="text" id="auth-pass" style="-webkit-text-security:disc;"/></div>'
+    + '<div class="form-error" id="auth-error"></div>'
+    + '<button class="btn" id="auth-submit" style="width:100%">' + (isSignup ? 'Create account' : 'Sign in') + '</button>'
+    + '<button class="btn ghost" id="auth-toggle" style="width:100%;margin-top:6px">'
+      + (isSignup ? 'Already have an ActionSync account? Sign in' : 'New here? Create an account') + '</button>';
+  document.getElementById('auth-toggle').addEventListener('click', function(){
+    _authMode = isSignup ? 'signin' : 'signup';
+    renderAuthGate();
+  });
+  document.getElementById('auth-submit').addEventListener('click', function(){
+    var email = document.getElementById('auth-email').value.trim();
+    var pass = document.getElementById('auth-pass').value;
+    var err = document.getElementById('auth-error');
+    var btn = document.getElementById('auth-submit');
+    if (!email || !pass) { err.textContent = 'Email and password are both needed.'; return; }
+    err.textContent = ''; btn.disabled = true; btn.textContent = isSignup ? 'Creating…' : 'Signing in…';
+    var go = isSignup ? AS.auth.signUp(email, pass, {}) : AS.auth.signIn(email, pass);
+    go.then(function(res){
+      btn.disabled = false; btn.textContent = isSignup ? 'Create account' : 'Sign in';
+      if (!res.ok) { err.textContent = res.error || 'Something went wrong.'; return; }
+      if (res.needsConfirm) {
+        err.textContent = 'Check your email to confirm your account, then sign in.';
+        _authMode = 'signin'; renderAuthGate(); return;
+      }
+      boot();
+    });
+  });
+}
+
+function nameOfProfile(row){
+  return (row && (row.display_name || row.name
+    || [row.first_name, row.last_name].filter(Boolean).join(' '))) || 'Someone';
+}
+
+// Real groups: owned crew_groups, plus ones you belong to but didn't
+// create -- the same set crew_groups_read's own RLS already allows
+// (owner_id = auth.uid() OR as_is_group_member(id)). The creator is
+// folded into memberIds since this page's existing visibleTo logic
+// already assumes the group's owner is one of its members.
+function loadGroups(sb, myId){
+  var owned = sb.from('crew_groups').select('*').eq('owner_id', myId);
+  var memberOf = sb.from('crew_group_members').select('group_id').eq('member_id', myId)
+    .then(function(r){
+      var ids = (r.data || []).map(function(x){ return x.group_id; });
+      if (!ids.length) return { data: [] };
+      return sb.from('crew_groups').select('*').in('id', ids);
+    });
+  return Promise.all([owned, memberOf]).then(function(res){
+    var byId = {};
+    (res[0].data || []).concat(res[1].data || []).forEach(function(g){ byId[g.id] = g; });
+    var groups = Object.keys(byId).map(function(id){ return byId[id]; });
+    if (!groups.length) { GROUPS = []; return; }
+    return sb.from('crew_group_members').select('group_id,member_id')
+      .in('group_id', groups.map(function(g){ return g.id; }))
+      .then(function(mr){
+        var membersByGroup = {};
+        (mr.data || []).forEach(function(r){
+          (membersByGroup[r.group_id] = membersByGroup[r.group_id] || []).push(r.member_id);
+        });
+        GROUPS = groups.map(function(g){
+          var ids = [g.owner_id].concat(membersByGroup[g.id] || []);
+          var seen = {};
+          ids = ids.filter(function(id){ return seen[id] ? false : (seen[id] = true); });
+          return { id:g.id, name:g.name, memberIds:ids };
+        });
+      });
+  });
+}
+
+function loadPeopleAndGroups(){
+  var sb = AS.auth.client(), user = AS.auth.user(), prof = AS.auth.profile();
+  if (!sb || !user) return Promise.resolve();
+
+  // Set before either network call so the page never has a null viewer
+  // or empty PEOPLE even if crew/groups fail to load.
+  var myPerson = { id:user.id, name:nameOfProfile(prof) || 'Me', color:PERSON_COLORS[0],
+                    photo:(prof && prof.photo_url) || '', simulated:false, blocks:[] };
+  PEOPLE = [myPerson];
+  viewerId = user.id;
+  selectedIds = [user.id];
+
+  return sb.from('crew').select('member_id').eq('owner_id', user.id).eq('status', 'accepted')
+    .then(function(cr){
+      var ids = (cr.data || []).map(function(r){ return r.member_id; });
+      if (!ids.length) return [];
+      return sb.from('profiles').select('id,name,display_name,first_name,last_name,photo_url')
+        .in('id', ids).then(function(pr){ return pr.data || []; });
+    })
+    .then(function(crewRows){
+      crewRows.forEach(function(row, i){
+        PEOPLE.push({ id:row.id, name:nameOfProfile(row), color:PERSON_COLORS[(i + 1) % PERSON_COLORS.length],
+                      photo:row.photo_url || '', simulated:false, blocks:[] });
+      });
+      selectedIds = PEOPLE.map(function(p){ return p.id; });
+    })
+    .catch(function(e){ console.warn('[friend-calendar] crew load failed:', e && e.message); })
+    .then(function(){ return loadGroups(sb, user.id); })
+    .catch(function(e){ console.warn('[friend-calendar] groups load failed:', e && e.message); });
+}
+
+function boot(){
+  document.getElementById('auth-gate').style.display = 'none';
+  loadPeopleAndGroups().then(renderAll);
+}
+
+AS.auth.ready().then(function(state){
+  if (state.user) { boot(); return; }
+  document.getElementById('auth-gate').style.display = 'block';
+  renderAuthGate();
+});
 </script>
 </body>
 </html>
