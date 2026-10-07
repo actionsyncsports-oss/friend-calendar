@@ -3,7 +3,16 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
-<title>Friend Calendar (blank)</title>
+<title>Friend Calendar</title>
+<meta name="description" content="See when your friends are free, and plan something together."/>
+<meta property="og:type" content="website"/>
+<meta property="og:title" content="Friend Calendar"/>
+<meta property="og:description" content="See when your friends are free, and plan something together."/>
+<!-- A link shared from "My QR"/"Add by link" carries ?from=<name>; middleware.js
+     swaps these three tags for a personalized "<name> is inviting you..." before
+     a messaging app's link-preview crawler ever sees this file -- crawlers don't
+     run JS, so that can't happen client-side. -->
+
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Karla:wght@400;500;700&family=Young+Serif&display=swap" rel="stylesheet"/>
 <style>
@@ -1371,7 +1380,9 @@ function renderAddFriend(){
     return '<button class="chip' + (t[0] === _addFriendTab ? ' on' : '') + '" data-fr-tab="' + t[0] + '">' + t[1] + '</button>';
   }).join(' ');
   var body = '';
-  var myUrl = location.origin + location.pathname + '?add=' + encodeURIComponent(viewerId);
+  var myName = (personById(viewerId) || {}).name || '';
+  var myUrl = location.origin + location.pathname + '?add=' + encodeURIComponent(viewerId)
+    + (myName ? '&from=' + encodeURIComponent(myName) : '');
   if (_addFriendTab === 'qr') {
     body = '<div style="font-size:13px;color:var(--soft);margin-bottom:10px;">Have a friend scan this with their phone’s camera — it opens this page and adds you as crew.</div>'
       + '<div id="my-qr" style="display:flex;justify-content:center;margin:10px 0;"></div>'
