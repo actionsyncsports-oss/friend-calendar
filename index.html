@@ -2864,8 +2864,24 @@ function renderProfile(){
   renderProfileInner();
   var card = document.getElementById('sheet-card'), h = card.querySelector('h4'), me = personById(viewerId);
   if (!h || !me) return;
-  h.insertAdjacentHTML('afterend', photoRowHtml(me));
+  h.insertAdjacentHTML('afterend', photoRowHtml(me) + nameRowHtml(me));
   bindPhotoRow(card, renderProfile);
+  bindNameRow(card, me);
+}
+// Shown above every profile sub-tab (not just "My area"), so there's
+// always a place to set your name -- the only one visible before this
+// was buried in "My area", off the default "Food" landing tab, which
+// read as "no way to set a name" to anyone who never clicked over.
+function nameRowHtml(me){
+  return '<div class="field" style="margin-top:4px"><label>Your name</label><input type="text" id="name-me" maxlength="60" value="' + esc(me.name || '') + '" placeholder="Your name"/></div>';
+}
+function bindNameRow(card, me){
+  var el = card.querySelector('#name-me');
+  if (!el) return;
+  el.addEventListener('change', function(){
+    var v = el.value.trim();
+    if (v && v !== me.name) { me.name = v; syncMyCoreProfile(); }
+  });
 }
 function renderProfileInner(){
   var me = personById(viewerId), t = taste(viewerId);
@@ -2919,7 +2935,6 @@ function renderProfileInner(){
 function renderAreaTab(card, me, tabs){
   card.innerHTML = '<h4>My profile</h4>'
     + '<div style="margin-bottom:8px">' + tabs + '</div>'
-    + '<div class="field"><label>Your name</label><input type="text" id="name-me" maxlength="60" value="' + esc(me.name || '') + '" placeholder="Your name"/></div>'
     + '<div class="field"><label>Where you are (town or neighbourhood)</label><input type="text" id="area-me" maxlength="60" value="' + esc(me.area || '') + '" placeholder="e.g. Rossland, BC"/></div>'
     + '<label class="check"><input type="checkbox" id="area-share"' + (me.shareArea !== false ? ' checked' : '') + '/> Friends can see my area</label>'
     + '<div class="sec">Trips and travel</div>'
@@ -2946,11 +2961,9 @@ function renderAreaTab(card, me, tabs){
     renderProfile();
   });
   function commitArea(){
-    var newName = document.getElementById('name-me').value.trim();
     var newShare = document.getElementById('area-share').checked;
-    var changed = newName !== me.name || document.getElementById('area-me').value.trim() !== me.area;
+    var changed = document.getElementById('area-me').value.trim() !== me.area;
     var shareChanged = newShare !== (me.shareArea !== false);
-    if (newName) me.name = newName;
     me.area = document.getElementById('area-me').value.trim(); me.shareArea = newShare;
     if (changed) syncMyCoreProfile();
     // share_area has no equivalent in ActionSync's own profiles table --
