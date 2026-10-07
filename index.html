@@ -268,7 +268,7 @@
 
 <div id="plans"></div>
 
-<div id="disclaimer">Your crew and groups come from ActionSync. Free time, plans and messages are still local to this device &mdash; syncing those is next.</div>
+<div id="disclaimer">Your crew, groups, free time and messages come from ActionSync. Plans are still local to this device &mdash; syncing those is next.</div>
 <div id="toast"></div>
 
 <div class="sheet-bg" id="sheet-bg"><div class="sheet-card" id="sheet-card"></div></div>
@@ -335,7 +335,13 @@ function safePhotoUrl(u){
   }catch(e){ return null; }
 }
 var uid = 0;
-function newId(p){ return p + '_' + (++uid); }
+// blk/th/m ids are now primary keys in SHARED tables (one row per block/
+// thread/message, written by whichever real account created it) -- a
+// plain per-session counter would give two different people's very
+// first block/message the same id ("blk_1") and collide. Timestamp +
+// random suffix is unique enough across different people's sessions
+// without needing a server round-trip just to mint an id.
+function newId(p){ return p + '_' + Date.now().toString(36) + '_' + (++uid) + Math.random().toString(36).slice(2, 8); }
 
 var HMIN = 6, HMAX = 24;   // the calendar day runs 6am to midnight
 var TODAY = dstrFromDate(new Date());
@@ -906,7 +912,7 @@ document.getElementById('today-btn').addEventListener('click', function(){
 
 /* ---------------- DAY SHEET: who's free + edit MY availability ---------------- */
 function openSheet(){ document.getElementById('sheet-bg').classList.add('on'); }
-function closeSheet(){ document.getElementById('sheet-bg').classList.remove('on'); openDate = null; }
+function closeSheet(){ document.getElementById('sheet-bg').classList.remove('on'); openDate = null; openThreadId = null; stopMsgPoll(); }
 document.getElementById('sheet-bg').addEventListener('click', function(e){ if (e.target.id === 'sheet-bg') closeSheet(); });
 
 function openDay(date){ openDate = date; searchArea = null; renderDaySheet(); openSheet(); }
@@ -1550,10 +1556,55 @@ function fmtTs(iso){
   if (dstrFromDate(d) === dstrFromDate(n)) return clock;
   return MONTHS[d.getMonth()].slice(0, 3) + ' ' + d.getDate() + ', ' + clock;
 }
+// 'chat' and 'group' threads are real, synced rows now (friend_calendar_
+// threads/messages) -- 'plan' threads (the auto-chat announcing a plan,
+// with its system messages) stay local/simulated, same as plans
+// themselves, which aren't synced yet either.
 function newThread(kind, title, memberIds, extra){
   var t = { id:newId('th'), kind:kind, title:title, memberIds:memberIds.slice(), messages:[], read:{}, muted:{} };
   if (extra) Object.keys(extra).forEach(function(k){ t[k] = extra[k]; });
-  THREADS.push(t); return t;
+  THREADS.push(t);
+  syncNewThread(t);
+  return t;
+}
+function syncNewThread(t){
+  if (t.kind === 'plan' || !(window.AS && AS.auth)) return;
+  var sb = AS.auth.client();
+  if (!sb) return;
+  sb.from('friend_calendar_threads').insert({
+    id:t.id, kind:t.kind, title:t.title || null, member_ids:t.memberIds,
+    group_id:t.groupId || null, created_by:viewerId
+  }).then(function(r){
+    // A unique-index conflict here means another member's session
+    // created this exact group's thread a moment earlier -- not an
+    // error, just means our local copy will get replaced by theirs
+    // next time threads refresh.
+    if (r.error && r.error.code !== '23505') console.warn('[friend-calendar] thread create failed:', r.error.message);
+  });
+}
+function syncMessageInsert(t, m){
+  if (t.kind === 'plan' || m.sys || !(window.AS && AS.auth)) return;
+  var sb = AS.auth.client();
+  if (!sb) return;
+  sb.from('friend_calendar_messages').insert({
+    id:m.id, thread_id:t.id, from_user_id:m.from, text:m.text, sys:false, created_at:m.ts
+  }).then(function(r){
+    if (r.error) console.warn('[friend-calendar] message send failed:', r.error.message);
+  });
+}
+// Mute + read position are per-(thread,person) -- only sync the viewer's
+// own, both because RLS only allows writing your own row and because
+// another person's local THREADS entry for them is just a simulated
+// stand-in, not their real session.
+function syncThreadState(t, personId){
+  if (t.kind === 'plan' || personId !== viewerId || !(window.AS && AS.auth)) return;
+  var sb = AS.auth.client();
+  if (!sb) return;
+  sb.from('friend_calendar_thread_state').upsert({
+    thread_id:t.id, user_id:viewerId, muted:!!t.muted[viewerId], read_until:t.read[viewerId] || new Date(0).toISOString()
+  }, { onConflict:'thread_id,user_id' }).then(function(r){
+    if (r.error) console.warn('[friend-calendar] thread state save failed:', r.error.message);
+  });
 }
 // Same people = same chat. Opens the existing one instead of making a duplicate.
 function findChat(memberIds){
@@ -1565,16 +1616,21 @@ function threadTitle(t, viewer){
   var others = t.memberIds.filter(function(i){ return i !== viewer; });
   return others.map(function(i){ return personById(i).name; }).join(', ');
 }
+// read[personId] is an ISO timestamp cursor, not a count -- a count only
+// made sense when messages only ever arrived in this one session's own
+// order; once they can come from someone else's device too, "read the
+// first N" stops meaning anything.
 function unreadIn(t, personId){
   if (t.memberIds.indexOf(personId) === -1) return 0;
-  var from = t.read[personId] || 0;
-  return t.messages.slice(from).filter(function(m){ return !m.sys && m.from !== personId; }).length;
+  var since = t.read[personId] || '';
+  return t.messages.filter(function(m){ return !m.sys && m.from !== personId && m.ts > since; }).length;
 }
 function totalUnread(personId){
   return THREADS.reduce(function(a, t){ return a + unreadIn(t, personId); }, 0);
 }
 function markRead(t, personId){
-  t.read[personId] = t.messages.length;
+  t.read[personId] = t.messages.length ? t.messages[t.messages.length - 1].ts : nowIso();
+  syncThreadState(t, personId);
   NOTIFS.forEach(function(n){ if (n.to === personId && n.ref && n.ref.thread === t.id) n.read = true; });
 }
 function notify(to, type, text, ref){
@@ -1592,19 +1648,22 @@ function sendMessage(t, from, text, sys, ts){
   var m = { id:newId('m'), from: sys ? null : from, text:text, ts: ts || nowIso(), sys:!!sys };
   t.messages.push(m);
   if (!sys) {
-    t.read[from] = t.messages.length;                               // sending counts as having read everything so far
+    t.read[from] = m.ts;                                            // sending counts as having read everything so far
+    if (from === viewerId) syncThreadState(t, viewerId);
+    syncMessageInsert(t, m);
     t.memberIds.forEach(function(i){
       if (i !== from) notify(i, 'message', personById(from).name + ' in ' + threadTitle(t, i) + ': ' + text.slice(0, 60), { thread:t.id, base:threadTitle(t, i) });
     });
   }
   return m;
 }
-// One chat per calendar group, created at boot and whenever a group is added.
+// One chat per calendar group, created the first time anyone opens
+// Messages after the group exists (called after real GROUPS loads, and
+// on every thread refresh -- harmless/no-op once it's already there).
 function ensureGroupThread(g){
   if (THREADS.some(function(t){ return t.groupId === g.id; })) return;
   newThread('group', g.name, g.memberIds, { groupId:g.id });
 }
-GROUPS.forEach(ensureGroupThread);
 NOTIFS.length = 0;
 
 // "Everyone's free" nudges: derived live from the calendars, never stored. Respects what each person can see.
@@ -1634,7 +1693,31 @@ function renderBadges(){
   document.getElementById('notif-btn').innerHTML = 'Alerts' + (a ? '<span class="badge">' + a + '</span>' : '');
 }
 
+// Which thread (if any) is the open sheet currently showing -- so a
+// background poll knows whether to re-render in place, and so leaving
+// a thread stops polling it instead of orphaning a timer.
+var openThreadId = null;
+var _msgPollTimer = null;
+function stopMsgPoll(){ clearInterval(_msgPollTimer); _msgPollTimer = null; }
+// Pulls fresh threads/messages/read-state from Supabase -- this is the
+// ONLY way a message someone else sent ever reaches this session, so
+// it runs whenever Messages opens and on a background interval, not
+// just once at boot.
+function refreshThreads(){
+  if (!(window.AS && AS.auth)) return Promise.resolve();
+  var sb = AS.auth.client();
+  if (!sb) return Promise.resolve();
+  return loadThreads(sb, viewerId).then(function(){
+    GROUPS.forEach(ensureGroupThread);
+    renderBadges();
+  }).catch(function(e){ console.warn('[friend-calendar] thread refresh failed:', e && e.message); });
+}
 function renderMessages(){
+  openThreadId = null; stopMsgPoll();
+  refreshThreads().then(function(){ if (openThreadId === null) renderMessagesList(); });
+  renderMessagesList();
+}
+function renderMessagesList(){
   var mine = THREADS.filter(function(t){ return t.memberIds.indexOf(viewerId) !== -1; }).sort(function(a, b){
     var la = a.messages.length ? a.messages[a.messages.length-1].ts : '', lb = b.messages.length ? b.messages[b.messages.length-1].ts : '';
     return la < lb ? 1 : la > lb ? -1 : 0;
@@ -1651,10 +1734,33 @@ function renderMessages(){
   var card = document.getElementById('sheet-card'); card.innerHTML = html;
   card.querySelectorAll('[data-thread]').forEach(function(r){ r.addEventListener('click', function(){ renderThread(r.dataset.thread); }); });
   document.getElementById('new-chat').addEventListener('click', renderNewChat);
-  document.getElementById('msg-close').addEventListener('click', function(){ closeSheet(); renderAll(); });
+  document.getElementById('msg-close').addEventListener('click', function(){ stopMsgPoll(); closeSheet(); renderAll(); });
+}
+// Polls just the open thread, fast enough to feel roughly-live without
+// real-time infrastructure. Keeps whatever the person was mid-typing
+// across a poll-triggered re-render.
+function pollThread(id){
+  stopMsgPoll();
+  _msgPollTimer = setInterval(function(){
+    if (openThreadId !== id || !(window.AS && AS.auth)) return;
+    var sb = AS.auth.client(); if (!sb) return;
+    var t = threadById(id); if (!t || t.kind === 'plan') return;
+    var since = t.messages.length ? t.messages[t.messages.length - 1].ts : '1970-01-01T00:00:00Z';
+    sb.from('friend_calendar_messages').select('*').eq('thread_id', id).gt('created_at', since).order('created_at', { ascending:true })
+      .then(function(r){
+        var rows = r.data || [];
+        if (!rows.length || openThreadId !== id) return;
+        rows.forEach(function(row){ t.messages.push(messageFromRow(row)); });
+        var inp = document.getElementById('msg-input'), draft = inp ? inp.value : '';
+        renderThread(id);
+        var inp2 = document.getElementById('msg-input');
+        if (inp2 && draft) inp2.value = draft;
+      });
+  }, 4000);
 }
 function renderThread(id){
   var t = threadById(id);
+  openThreadId = id;
   markRead(t, viewerId);
   var card = document.getElementById('sheet-card');
   var plan = t.planId ? PLANS.filter(function(p){ return p.id === t.planId; })[0] : null;
@@ -1670,7 +1776,7 @@ function renderThread(id){
     + '<button class="btn ghost" id="thread-back">All messages</button>'
     + (plan ? '<button class="btn ghost" id="thread-day">See the day</button>' : '')
     + '<button class="btn ghost" id="thread-mute">' + (t.muted[viewerId] ? 'Unmute' : 'Mute') + '</button></div>'
-    + '<div style="font-size:12px;color:var(--soft);margin-top:6px">Chat stays on this device for now. Messages reaching a friend’s own phone need the backend.</div>';
+    + (t.kind === 'plan' ? '<div style="font-size:12px;color:var(--soft);margin-top:6px">This chat is about a plan, and plans aren’t synced yet -- it stays on this device for now.</div>' : '');
   card.innerHTML = html;
   var box = document.getElementById('msgs'); box.scrollTop = box.scrollHeight;
   function send(){
@@ -1680,9 +1786,10 @@ function renderThread(id){
   document.getElementById('msg-send').addEventListener('click', send);
   document.getElementById('msg-input').addEventListener('keydown', function(e){ if (e.key === 'Enter') { e.preventDefault(); send(); } });
   document.getElementById('thread-back').addEventListener('click', function(){ renderMessages(); renderBadges(); });
-  document.getElementById('thread-mute').addEventListener('click', function(){ t.muted[viewerId] = !t.muted[viewerId]; renderThread(id); });
+  document.getElementById('thread-mute').addEventListener('click', function(){ t.muted[viewerId] = !t.muted[viewerId]; syncThreadState(t, viewerId); renderThread(id); });
   if (plan) document.getElementById('thread-day').addEventListener('click', function(){ var d = parseDate(plan.date); closeSheet(); setViewMonth(d.getFullYear(), d.getMonth()); openDay(plan.date); });
   renderBadges();
+  if (t.kind !== 'plan') pollThread(id);
 }
 function renderNewChat(){
   var card = document.getElementById('sheet-card');
@@ -1738,7 +1845,7 @@ function announcePlan(plan){
   var members = Object.keys(plan.rsvps), creator = personById(plan.creatorId);
   var t = newThread('plan', plan.title, members, { planId:plan.id });
   sendMessage(t, plan.creatorId, creator.name + ' set this up: ' + plan.title + ', ' + longDate(plan.date) + ', ' + fmtRange(plan.start, plan.end) + (plan.area ? ', ' + plan.area : '') + (plan.spot ? ', at ' + plan.spot : '') + '.', true);
-  t.read[plan.creatorId] = t.messages.length;
+  markRead(t, plan.creatorId);
   members.forEach(function(i){
     if (i !== plan.creatorId) notify(i, 'invite', creator.name + ' invited you: ' + plan.title + ', ' + longDate(plan.date), { date:plan.date });
   });
@@ -3286,7 +3393,13 @@ function loadPeopleAndGroups(){
     })
     .catch(function(e){ console.warn('[friend-calendar] blocks load failed:', e && e.message); })
     .then(function(){ return loadGroups(sb, user.id); })
-    .catch(function(e){ console.warn('[friend-calendar] groups load failed:', e && e.message); });
+    .catch(function(e){ console.warn('[friend-calendar] groups load failed:', e && e.message); })
+    // Threads/messages, after groups so a group that doesn't have its
+    // own chat yet (nobody's opened Messages since it was made) gets
+    // one created here rather than leaving it permanently missing.
+    .then(function(){ return loadThreads(sb, user.id); })
+    .then(function(){ GROUPS.forEach(ensureGroupThread); })
+    .catch(function(e){ console.warn('[friend-calendar] threads load failed:', e && e.message); });
 }
 function blockFromRow(row){
   return { id:row.id, date:row.date, start:row.start_hour, end:row.end_hour,
@@ -3294,6 +3407,42 @@ function blockFromRow(row){
     level:row.level || 'free', visibleTo: row.visible_to == null ? 'all' : row.visible_to,
     area:row.area || '', travel:!!row.travel, remote:!!row.remote,
     cancelledDates: row.cancelled_dates || [] };
+}
+// Threads/messages were purely in-memory before this -- a message never
+// reached a friend's own device at all. Only replaces 'chat'/'group'
+// threads (the ones actually synced); any local 'plan' thread already
+// in THREADS this session is preserved, since plans aren't synced yet.
+function loadThreads(sb, myId){
+  return sb.from('friend_calendar_threads').select('*').contains('member_ids', [myId])
+    .then(function(tr){
+      var synced = (tr.data || []).map(threadFromRow);
+      var planThreads = THREADS.filter(function(t){ return t.kind === 'plan'; });
+      THREADS = synced.concat(planThreads);
+      var ids = synced.map(function(t){ return t.id; });
+      if (!ids.length) return;
+      return Promise.all([
+        sb.from('friend_calendar_messages').select('*').in('thread_id', ids).order('created_at', { ascending:true }),
+        sb.from('friend_calendar_thread_state').select('*').eq('user_id', myId).in('thread_id', ids)
+      ]).then(function(res){
+        (res[0].data || []).forEach(function(row){
+          var t = threadById(row.thread_id);
+          if (t) t.messages.push(messageFromRow(row));
+        });
+        (res[1].data || []).forEach(function(row){
+          var t = threadById(row.thread_id);
+          if (!t) return;
+          t.muted[myId] = !!row.muted;
+          t.read[myId] = row.read_until;
+        });
+      });
+    });
+}
+function threadFromRow(row){
+  return { id:row.id, kind:row.kind, title:row.title || '', memberIds:(row.member_ids || []).slice(),
+    groupId:row.group_id || undefined, messages:[], read:{}, muted:{} };
+}
+function messageFromRow(row){
+  return { id:row.id, from:row.from_user_id, text:row.text, ts:row.created_at, sys:!!row.sys };
 }
 // Local-first (every caller mutates the block object before calling
 // this), synced right after -- same pattern as syncMyProfile(). Not
@@ -3369,6 +3518,10 @@ function boot(){
     renderAll();
     handleAddFromLink();
   });
+  // A friend's message otherwise only shows up once you happen to open
+  // Messages again -- this keeps the badge count honest in the
+  // background too. Skips while a thread's own faster poll has it covered.
+  setInterval(function(){ if (!openThreadId) refreshThreads(); }, 30000);
 }
 
 // ---- DEMO MODE (?demo=1) ------------------------------------------
@@ -3392,6 +3545,7 @@ function seedDemoData(){
     { id:'demo-sam', name:'Sam', color:PERSON_COLORS[2], area:'', shareArea:true, blocks:[] }
   ];
   GROUPS = [ { id:'demo-g1', name:'Ski crew', memberIds:['demo-me', 'demo-jess', 'demo-sam'] } ];
+  GROUPS.forEach(ensureGroupThread);   // syncNewThread() no-ops: AS.auth.client() is stubbed to null above
   selectedIds = PEOPLE.map(function(p){ return p.id; });
 
   var me = personById('demo-me');
