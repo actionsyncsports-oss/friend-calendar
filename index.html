@@ -3123,7 +3123,8 @@ function renderAuthGate(){
   var body = document.getElementById('auth-gate-body');
   var isSignup = _authMode === 'signup';
   body.innerHTML =
-      '<div class="field"><label>Email</label><input type="text" id="auth-email"/></div>'
+      (isSignup ? '<div class="field"><label>Your name</label><input type="text" id="auth-name" maxlength="60"/></div>' : '')
+    + '<div class="field"><label>Email</label><input type="text" id="auth-email"/></div>'
     + '<div class="field"><label>Password</label><input type="text" id="auth-pass" style="-webkit-text-security:disc;"/></div>'
     + '<div class="form-error" id="auth-error"></div>'
     + '<button class="btn" id="auth-submit" style="width:100%">' + (isSignup ? 'Create account' : 'Sign in') + '</button>'
@@ -3134,13 +3135,18 @@ function renderAuthGate(){
     renderAuthGate();
   });
   document.getElementById('auth-submit').addEventListener('click', function(){
+    var nameEl = document.getElementById('auth-name'), name = nameEl ? nameEl.value.trim() : '';
     var email = document.getElementById('auth-email').value.trim();
     var pass = document.getElementById('auth-pass').value;
     var err = document.getElementById('auth-error');
     var btn = document.getElementById('auth-submit');
+    if (isSignup && !name) { err.textContent = 'What should friends see your name as?'; return; }
     if (!email || !pass) { err.textContent = 'Email and password are both needed.'; return; }
     err.textContent = ''; btn.disabled = true; btn.textContent = isSignup ? 'Creating…' : 'Signing in…';
-    var go = isSignup ? AS.auth.signUp(email, pass, {}) : AS.auth.signIn(email, pass);
+    // A fresh signup has no ActionSync profile to inherit a name from --
+    // this is the only chance to collect one before the account exists
+    // with nothing but "Someone" to show for it everywhere.
+    var go = isSignup ? AS.auth.signUp(email, pass, { display_name:name }) : AS.auth.signIn(email, pass);
     go.then(function(res){
       btn.disabled = false; btn.textContent = isSignup ? 'Create account' : 'Sign in';
       if (!res.ok) { err.textContent = res.error || 'Something went wrong.'; return; }
