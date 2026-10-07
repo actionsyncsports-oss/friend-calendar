@@ -990,6 +990,7 @@ function renderDaySheet(){
       + (b.repeat === 'weekly' ? ' <span style="color:var(--soft)">every ' + WEEKDAYS[wdMon0(b.date)]
           + (b.repeatUntil ? ' until ' + longDate(b.repeatUntil) : ', no end date') + '</span>' : '') + '</span>'
       + (b.repeat === 'weekly' ? '<button class="btn small" data-cancel-date="' + b.id + '">Not this ' + WEEKDAYS[wdMon0(date)].slice(0, 3) + '</button>' : '')
+      + '<button class="btn small ghost" data-edit-block="' + b.id + '">Edit</button>'
       + '<button class="btn small danger" data-del="' + b.id + '">' + (b.repeat === 'weekly' ? 'Remove series' : 'Remove') + '</button></div>';
   }).join('') : '<div style="font-size:12px;color:var(--soft);padding:4px 0">Nothing offered this day.</div>';
   html += cancelledMine.map(function(b){
@@ -1019,6 +1020,12 @@ function renderDaySheet(){
       renderDaySheet(); renderCalendar();
     });
   });
+  card.querySelectorAll('[data-edit-block]').forEach(function(b){
+    b.addEventListener('click', function(){
+      var blk = viewer.blocks.filter(function(x){ return x.id === b.dataset.editBlock; })[0];
+      if (blk) renderFreeForm(date, blk);
+    });
+  });
   card.querySelectorAll('[data-cancel-date]').forEach(function(b){
     b.addEventListener('click', function(){
       var blk = viewer.blocks.filter(function(x){ return x.id === b.dataset.cancelDate; })[0];
@@ -1036,61 +1043,79 @@ function renderDaySheet(){
   document.getElementById('ft-btn').addEventListener('click', function(){ renderFreeForm(date); });
   document.getElementById('evday-btn').addEventListener('click', function(){ renderEventForm(date); });
 }
-function renderFreeForm(date){
+// editBlock, when given, switches this into "edit" mode: one existing
+// block, pre-filled, saved in place (no multi-day picker -- that only
+// ever made sense for creating several new blocks at once).
+function renderFreeForm(date, editBlock){
   var viewer = personById(viewerId);
   var weekDays = weekDaysFrom(date);
-  var html = '<h4>Add free time</h4><div style="font-size:12px;color:var(--soft);margin-bottom:10px">' + longDate(date) + '</div>'
-    + '<div class="field"><label>Which day(s) this week</label>'
+  // A visibleTo array that happens to exactly match a group's current
+  // membership is shown as that group selected, not as "Pick people" --
+  // same reverse-mapping either way in or out of edit mode.
+  var visSel = 'all', visPick = [];
+  if (editBlock && Array.isArray(editBlock.visibleTo)) {
+    var matchGroup = GROUPS.filter(function(g){
+      var gm = g.memberIds.filter(function(id){ return id !== viewerId; }).slice().sort().join(',');
+      return gm === editBlock.visibleTo.slice().sort().join(',');
+    })[0];
+    if (matchGroup) visSel = 'g:' + matchGroup.id; else { visSel = 'pick'; visPick = editBlock.visibleTo; }
+  }
+  var html = '<h4>' + (editBlock ? 'Edit free time' : 'Add free time') + '</h4><div style="font-size:12px;color:var(--soft);margin-bottom:10px">' + longDate(date) + '</div>'
+    + (editBlock ? '' : '<div class="field"><label>Which day(s) this week</label>'
     + '<div style="display:flex;gap:5px;flex-wrap:wrap;">' + weekDays.map(function(d){
         var dd = parseDate(d);
         return '<label class="check" style="flex-direction:column;gap:2px;border:1.5px solid var(--rule);border-radius:8px;padding:6px 9px;margin:0;">'
           + '<input type="checkbox" class="blk-day" value="' + d + '"' + (d === date ? ' checked' : '') + '/>'
           + '<span style="font-size:11px;white-space:nowrap;">' + WEEKDAYS[wdMon0(d)].slice(0, 3) + ' ' + dd.getDate() + '</span></label>';
-      }).join('') + '</div></div>'
+      }).join('') + '</div></div>')
     + '<div class="field"><label>How available</label><select id="blk-level"><option value="free">Available</option><option value="open">Open, if the right person or plan comes up</option></select></div>'
-    + '<div class="row2"><div class="field"><label>From</label><select id="blk-start">' + timeOptions(18, HMIN, HMAX - 1) + '</select></div>'
-    + '<div class="field"><label>To</label><select id="blk-end">' + timeOptions(21, HMIN + 1, HMAX) + '</select></div></div>'
-    + '<label class="check"><input type="checkbox" id="blk-remote"/> Remote — phone call, video chat, online game (no location needed)</label>'
+    + '<div class="row2"><div class="field"><label>From</label><select id="blk-start">' + timeOptions(editBlock ? editBlock.start : 18, HMIN, HMAX - 1) + '</select></div>'
+    + '<div class="field"><label>To</label><select id="blk-end">' + timeOptions(editBlock ? editBlock.end : 21, HMIN + 1, HMAX) + '</select></div></div>'
+    + '<label class="check"><input type="checkbox" id="blk-remote"' + (editBlock && editBlock.remote ? ' checked' : '') + '/> Remote — phone call, video chat, online game (no location needed)</label>'
     + '<div id="blk-location-fields">'
     + '<div class="field"><label>Where you’ll be</label><select id="blk-where"><option value="">' + esc(tripAreaOn(viewerId, date) || areaOf(viewerId) || 'My area') + (tripAreaOn(viewerId, date) ? ' (trip)' : ' (home)') + '</option>'
       + '<option value="@other">Somewhere else…</option></select></div>'
-    + '<div id="blk-other" style="display:none" class="field"><input type="text" id="blk-area" maxlength="60" list="blk-area-list" autocomplete="off" placeholder="Town, e.g. Nelson, BC"/>'
+    + '<div id="blk-other" style="' + (editBlock && editBlock.area ? '' : 'display:none') + '" class="field"><input type="text" id="blk-area" maxlength="60" list="blk-area-list" autocomplete="off" placeholder="Town, e.g. Nelson, BC" value="' + esc(editBlock ? editBlock.area || '' : '') + '"/>'
       + '<datalist id="blk-area-list">' + allKnownAreas().map(function(a){ return '<option value="' + esc(a) + '"></option>'; }).join('') + '</datalist></div>'
-    + '<label class="check"><input type="checkbox" id="blk-travel"/> I can travel to meet (nearby towns are fine)</label>'
+    + '<label class="check"><input type="checkbox" id="blk-travel"' + (editBlock && editBlock.travel ? ' checked' : '') + '/> I can travel to meet (nearby towns are fine)</label>'
     + '</div>'
     + '<div class="field"><label>Who can see this</label><select id="blk-vis"><option value="all">All my friends</option>'
       + GROUPS.map(function(g){ return '<option value="g:' + g.id + '">Just ' + esc(g.name) + '</option>'; }).join('')
       + '<option value="pick">Pick people…</option></select></div>'
-    + '<div id="blk-pick" style="display:none;margin:-4px 0 8px">'
-      + othersOrdered().map(function(x){ return '<label class="check"><input type="checkbox" class="blk-who" value="' + x.id + '"/><i class="dot" style="background:' + x.color + '"></i>' + esc(x.name) + '</label>'; }).join('')
+    + '<div id="blk-pick" style="' + (visSel === 'pick' ? '' : 'display:none') + ';margin:-4px 0 8px">'
+      + othersOrdered().map(function(x){ return '<label class="check"><input type="checkbox" class="blk-who" value="' + x.id + '"' + (visPick.indexOf(x.id) !== -1 ? ' checked' : '') + '/><i class="dot" style="background:' + x.color + '"></i>' + esc(x.name) + '</label>'; }).join('')
     + '</div>'
-    + '<label class="check"><input type="checkbox" id="blk-repeat"/> Repeat weekly on the checked day(s)</label>'
+    + (editBlock ? '' : '<label class="check"><input type="checkbox" id="blk-repeat"/> Repeat weekly on the checked day(s)</label>'
     + '<div id="blk-repeat-until" style="display:none" class="field"><label>Ends</label><select id="blk-repeat-weeks">'
       + '<option value="4">In 4 weeks</option><option value="8">In 8 weeks</option><option value="12" selected>In 12 weeks</option>'
-      + '<option value="26">In 6 months</option><option value="">No end date</option></select></div>'
+      + '<option value="26">In 6 months</option><option value="">No end date</option></select></div>')
     + '<div class="form-error" id="blk-error"></div>'
-    + '<button class="btn" id="blk-add" style="width:100%">Add</button>'
+    + '<button class="btn" id="blk-add" style="width:100%">' + (editBlock ? 'Save changes' : 'Add') + '</button>'
     + '<button class="btn ghost" id="ft-back" style="width:100%;margin-top:6px">Back</button>';
 
   document.getElementById('sheet-card').innerHTML = html;
+  document.getElementById('blk-level').value = editBlock ? (editBlock.level || 'free') : 'free';
+  document.getElementById('blk-vis').value = visSel;
   document.getElementById('ft-back').addEventListener('click', function(){ renderDaySheet(); });
   document.getElementById('blk-where').addEventListener('change', function(){
     document.getElementById('blk-other').style.display = this.value === '@other' ? 'block' : 'none';
   });
+  if (editBlock && editBlock.area) document.getElementById('blk-where').value = '@other';
   document.getElementById('blk-remote').addEventListener('change', function(){
     document.getElementById('blk-location-fields').style.display = this.checked ? 'none' : 'block';
   });
+  if (editBlock && editBlock.remote) document.getElementById('blk-location-fields').style.display = 'none';
   document.getElementById('blk-vis').addEventListener('change', function(){
     document.getElementById('blk-pick').style.display = this.value === 'pick' ? 'block' : 'none';
   });
-  document.getElementById('blk-repeat').addEventListener('change', function(){
+  if (!editBlock) document.getElementById('blk-repeat').addEventListener('change', function(){
     document.getElementById('blk-repeat-until').style.display = this.checked ? 'block' : 'none';
   });
   document.getElementById('blk-add').addEventListener('click', function(){
     var s = Number(document.getElementById('blk-start').value), e = Number(document.getElementById('blk-end').value);
     var err = document.getElementById('blk-error');
     if (e <= s) { err.textContent = 'The end has to be after the start.'; return; }
-    var days = Array.from(document.querySelectorAll('.blk-day:checked')).map(function(cb){ return cb.value; });
+    var days = editBlock ? [editBlock.date] : Array.from(document.querySelectorAll('.blk-day:checked')).map(function(cb){ return cb.value; });
     if (!days.length) { err.textContent = 'Pick at least one day.'; return; }
     var vis = document.getElementById('blk-vis').value, visibleTo = 'all';
     if (vis.indexOf('g:') === 0) {
@@ -1103,8 +1128,18 @@ function renderFreeForm(date){
     var remote = document.getElementById('blk-remote').checked;
     var where = document.getElementById('blk-where').value, areaTxt = document.getElementById('blk-area').value.trim();
     if (!remote && where === '@other' && !areaTxt) { err.textContent = 'Type the town, or choose your usual place.'; return; }
-    var repeat = document.getElementById('blk-repeat').checked;
-    var repeatWeeks = repeat ? document.getElementById('blk-repeat-weeks').value : '';
+    var repeat = editBlock ? (editBlock.repeat === 'weekly') : document.getElementById('blk-repeat').checked;
+    var repeatWeeks = (!editBlock && repeat) ? document.getElementById('blk-repeat-weeks').value : '';
+    if (editBlock) {
+      editBlock.start = s; editBlock.end = e;
+      editBlock.level = document.getElementById('blk-level').value; editBlock.visibleTo = visibleTo;
+      editBlock.area = (!remote && where === '@other') ? areaTxt : '';
+      editBlock.travel = !remote && document.getElementById('blk-travel').checked;
+      editBlock.remote = remote;
+      syncBlockUpsert(editBlock);
+      renderDaySheet(); renderCalendar();
+      return;
+    }
     days.forEach(function(d){
       var blk = {
         id:newId('blk'), date:d, start:s, end:e,
@@ -1291,6 +1326,40 @@ function cancelPlan(plan){
   PLANS = PLANS.filter(function(x){ return x.id !== plan.id; });
   syncPlanDelete(plan.id);
 }
+// Creator-only (the Edit button only shows for them, and RLS backs
+// that up). Title/time/place/notes -- not the date or the invite list,
+// see syncPlanUpdate()'s own comment for why.
+function renderEditPlan(plan){
+  var card = document.getElementById('sheet-card');
+  card.innerHTML = '<h4>Edit plan</h4><div style="font-size:12px;color:var(--soft);margin-bottom:10px">' + longDate(plan.date) + '</div>'
+    + '<div class="field"><label>What’s the plan?</label><input type="text" id="ep-title" maxlength="80" value="' + esc(plan.title || '') + '"/></div>'
+    + '<div class="row2"><div class="field"><label>From</label><select id="ep-start">' + timeOptions(plan.start, HMIN, HMAX - 1) + '</select></div>'
+    + '<div class="field"><label>To</label><select id="ep-end">' + timeOptions(plan.end, HMIN + 1, HMAX) + '</select></div></div>'
+    + '<div class="field"><label>Where (town)</label><input type="text" id="ep-where" maxlength="60" value="' + esc(plan.area || '') + '"/></div>'
+    + '<div class="field"><label>Where exactly (optional)</label><input type="text" id="ep-spot" maxlength="80" value="' + esc(plan.spot || '') + '"/></div>'
+    + '<div class="field"><label>Notes (optional)</label><input type="text" id="ep-notes" value="' + esc(plan.notes || '') + '"/></div>'
+    + '<div class="form-error" id="ep-error"></div>'
+    + '<button class="btn" id="ep-save" style="width:100%">Save changes</button><button class="btn ghost" id="ep-back" style="width:100%;margin-top:6px">Cancel</button>';
+  document.getElementById('ep-back').addEventListener('click', function(){ closeSheet(); renderAll(); });
+  document.getElementById('ep-save').addEventListener('click', function(){
+    var title = document.getElementById('ep-title').value.trim();
+    var s = Number(document.getElementById('ep-start').value), e = Number(document.getElementById('ep-end').value);
+    var err = document.getElementById('ep-error');
+    if (!title) { err.textContent = 'Give it a name.'; return; }
+    if (e <= s) { err.textContent = 'The end has to be after the start.'; return; }
+    var oldStart = plan.start, oldEnd = plan.end, timeChanged = s !== oldStart || e !== oldEnd;
+    if (timeChanged) Object.keys(plan.rsvps).forEach(function(i){ if (plan.rsvps[i] === 'going') restoreAvailability(i, plan.date, oldStart, oldEnd); });
+    plan.title = title; plan.start = s; plan.end = e;
+    plan.area = document.getElementById('ep-where').value.trim();
+    plan.spot = document.getElementById('ep-spot').value.trim();
+    plan.notes = document.getElementById('ep-notes').value.trim();
+    if (timeChanged) Object.keys(plan.rsvps).forEach(function(i){ if (plan.rsvps[i] === 'going') consumeAvailability(i, plan.date, s, e); });
+    syncPlanUpdate(plan);
+    var t = threadForPlan(plan);
+    if (t) sendMessage(t, null, personById(plan.creatorId).name + ' updated this plan.', true);
+    closeSheet(); renderAll();
+  });
+}
 
 /* ---------------- PLANS LIST + RSVP ---------------- */
 var RSVP_LABEL = { going:'Going', maybe:'Maybe', no:'Can’t' };
@@ -1322,7 +1391,7 @@ function renderPlans(){
       }).join('') + '</div>';
     }
     html += '<div class="acts"><button class="btn small ghost" data-plan-chat="' + p.id + '">Open chat</button><button class="btn small ghost" data-plan-day="' + p.id + '">See the day</button>'
-      + (p.creatorId === viewerId ? '<button class="btn small danger" data-plan-cancel="' + p.id + '">Cancel plan</button>' : '') + '</div>';
+      + (p.creatorId === viewerId ? '<button class="btn small ghost" data-plan-edit="' + p.id + '">Edit</button><button class="btn small danger" data-plan-cancel="' + p.id + '">Cancel plan</button>' : '') + '</div>';
     html += '</div>';
   });
   if (seeing.length) {
@@ -1344,6 +1413,9 @@ function renderPlans(){
   el.querySelectorAll('[data-plan-cancel]').forEach(function(b){ b.addEventListener('click', function(){
     if (b.dataset.sure !== '1') { b.dataset.sure = '1'; b.textContent = 'Tap again to cancel'; return; }     // one extra tap instead of a pop-up
     cancelPlan(planOf(b, 'data-plan-cancel')); renderAll();
+  }); });
+  el.querySelectorAll('[data-plan-edit]').forEach(function(b){ b.addEventListener('click', function(){
+    renderEditPlan(planOf(b, 'data-plan-edit')); openSheet();
   }); });
   el.querySelectorAll('[data-plan-join]').forEach(function(b){
     b.addEventListener('click', function(){
@@ -2184,7 +2256,9 @@ function eventsDayHtml(date, ids){
       + (ev.item && ids.length > 1 ? '<div class="em">' + into.length + ' of ' + ids.length + ' of you like ' + esc(catLabel(ev.item).toLowerCase()) + '.</div>' : '')
       + (intr.length ? '<div class="em">Interested: ' + intr.map(function(i){ return esc(personById(i).name); }).join(', ') + '</div>' : '')
       + '<div class="acts"><button class="btn small ghost" data-ev-int="' + ev.id + '">' + (ev.interested[viewerId] ? 'Not interested' : 'Interested') + '</button>'
-      + '<button class="btn small" data-ev-plan="' + ev.id + '">Make it a plan</button>' + (u ? ' <a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">Details</a>' : '') + '</div></div>';
+      + '<button class="btn small" data-ev-plan="' + ev.id + '">Make it a plan</button>'
+      + (ev.by === viewerId && !ev.src ? '<button class="btn small ghost" data-ev-edit="' + ev.id + '">Edit</button>' : '')
+      + (u ? ' <a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">Details</a>' : '') + '</div></div>';
   });
   return h;
 }
@@ -2207,6 +2281,10 @@ function bindDaySheetLocal(date){
     renderPlanForm(ev.date, ev.start, ev.end, who, [], ev.area);
     document.getElementById('plan-title').value = ev.title.replace(/ \(sample\)$/, '');
     var sel = document.getElementById('plan-item'); if (ev.item && Array.prototype.some.call(sel.options, function(o){ return o.value === ev.item; })) sel.value = ev.item;
+  }); });
+  card.querySelectorAll('[data-ev-edit]').forEach(function(b){ b.addEventListener('click', function(){
+    var ev = EVENTS.filter(function(x){ return x.id === b.dataset.evEdit; })[0];
+    if (ev) renderEditEvent(ev);
   }); });
 }
 
@@ -2522,7 +2600,9 @@ function eventFormHtml(date, area){
     + '<div class="field"><label>Who sees it</label><select id="ev-vis"><option value="all">All my friends</option>' + GROUPS.map(function(g){ return '<option value="g:' + g.id + '">Just ' + esc(g.name) + '</option>'; }).join('') + '</select></div>'
     + '<div class="form-error" id="ev-error"></div>';
 }
-function bindEventSave(done){
+// editEvent, when given, saves changes to that existing (manually-
+// added) event in place instead of creating a new one.
+function bindEventSave(done, editEvent){
   var evSave = document.getElementById('ev-save');
   if (evSave) evSave.addEventListener('click', function(){
     var err = document.getElementById('ev-error'), title = document.getElementById('ev-title').value.trim(), date = document.getElementById('ev-date').value.trim();
@@ -2533,12 +2613,40 @@ function bindEventSave(done){
     if (url && !safeUrl(url)) { err.textContent = 'The link should start with http:// or https://.'; return; }
     var vis = document.getElementById('ev-vis').value, visibleTo = 'all';
     if (vis.indexOf('g:') === 0) visibleTo = GROUPS.filter(function(g){ return g.id === vis.slice(2); })[0].memberIds.filter(function(i){ return i !== viewerId; });
+    if (editEvent) {
+      editEvent.title = title; editEvent.date = date; editEvent.start = st; editEvent.end = en;
+      editEvent.area = document.getElementById('ev-area').value.trim(); editEvent.item = document.getElementById('ev-item').value;
+      editEvent.note = document.getElementById('ev-note').value.trim(); editEvent.url = safeUrl(url); editEvent.visibleTo = visibleTo;
+      syncEventUpdate(editEvent);
+      done(editEvent);
+      return;
+    }
     var ev = { id:newId('ev'), title:title, date:date, start:st, end:en, area:document.getElementById('ev-area').value.trim(), item:document.getElementById('ev-item').value,
                note:document.getElementById('ev-note').value.trim(), url:safeUrl(url), by:viewerId, visibleTo:visibleTo, interested:{}, createdAt:nowIso() };
     EVENTS.push(ev);
     syncEventCreate(ev);
     done(ev);
   });
+}
+function renderEditEvent(ev){
+  document.getElementById('sheet-card').innerHTML = '<h4>Edit event</h4><div style="font-size:12px;color:var(--soft);margin-bottom:10px">' + longDate(ev.date) + '</div>'
+    + eventFormHtml(ev.date, ev.area)
+    + '<button class="btn" id="ev-save" style="width:100%">Save changes</button><button class="btn ghost" id="ev-back" style="width:100%;margin-top:6px">Cancel</button>';
+  document.getElementById('ev-title').value = ev.title;
+  document.getElementById('ev-start').value = ev.start;
+  document.getElementById('ev-end').value = ev.end;
+  document.getElementById('ev-item').value = ev.item || '';
+  document.getElementById('ev-note').value = ev.note || '';
+  document.getElementById('ev-url').value = ev.url || '';
+  if (Array.isArray(ev.visibleTo)) {
+    var matchGroup = GROUPS.filter(function(g){
+      var gm = g.memberIds.filter(function(id){ return id !== viewerId; }).slice().sort().join(',');
+      return gm === ev.visibleTo.slice().sort().join(',');
+    })[0];
+    if (matchGroup) document.getElementById('ev-vis').value = 'g:' + matchGroup.id;
+  }
+  document.getElementById('ev-back').addEventListener('click', function(){ renderDaySheet(); });
+  bindEventSave(function(){ renderDaySheet(); renderCalendar(); renderBadges(); }, ev);
 }
 function renderEventForm(date){
   var an = dayAnalysis(date, activeIds());
@@ -3602,6 +3710,23 @@ function syncPlanDelete(planId){
     if (r.error) console.warn('[friend-calendar] plan cancel failed:', r.error.message);
   });
 }
+// Title/time/place/notes only -- not the invite list or the date. The
+// invite list ties into the plan's own thread (whose member list is
+// fixed at creation, same limitation joinPlan() already has) and
+// changing the date would need the same consume/restore-availability
+// bookkeeping a brand new plan gets, for comparatively little benefit
+// over just cancelling and remaking it.
+function syncPlanUpdate(plan){
+  if (!(window.AS && AS.auth)) return;
+  var sb = AS.auth.client();
+  if (!sb) return;
+  sb.from('friend_calendar_plans').update({
+    title:plan.title || null, start_hour:plan.start, end_hour:plan.end, item:plan.item || null,
+    area:plan.area || '', spot:plan.spot || '', notes:plan.notes || '', updated_at:new Date().toISOString()
+  }).eq('id', plan.id).then(function(r){
+    if (r.error) console.warn('[friend-calendar] plan update failed:', r.error.message);
+  });
+}
 // Only a MANUALLY-added event is synced -- an auto-imported one (from
 // a pasted calendar feed URL, SOURCES below) stays local to whoever
 // subscribed to that feed, same as before this section. Syncing an
@@ -3635,6 +3760,18 @@ function syncEventCreate(ev){
     visible_to: ev.visibleTo == null ? 'all' : ev.visibleTo
   }).then(function(r){
     if (r.error) console.warn('[friend-calendar] event save failed:', r.error.message);
+  });
+}
+function syncEventUpdate(ev){
+  if (!(window.AS && AS.auth)) return;
+  var sb = AS.auth.client();
+  if (!sb) return;
+  sb.from('friend_calendar_events').update({
+    title:ev.title, date:ev.date, start_hour:ev.start, end_hour:ev.end, all_day:!!ev.allDay,
+    area:ev.area || '', item:ev.item || '', note:ev.note || '', url:ev.url || '',
+    visible_to: ev.visibleTo == null ? 'all' : ev.visibleTo, updated_at:new Date().toISOString()
+  }).eq('id', ev.id).then(function(r){
+    if (r.error) console.warn('[friend-calendar] event update failed:', r.error.message);
   });
 }
 function syncEventInterest(eventId, on){
