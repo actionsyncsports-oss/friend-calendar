@@ -346,6 +346,106 @@ function newId(p){ return p + '_' + Date.now().toString(36) + '_' + (++uid) + Ma
 var HMIN = 6, HMAX = 24;   // the calendar day runs 6am to midnight
 var TODAY = dstrFromDate(new Date());
 
+/* ---------------- TIME ZONES ---------------- */
+// Every block/plan/event's date+hour is a WALL-CLOCK time in its
+// OWNER's own zone -- "free 6-9pm" always means 6-9pm THEIR time,
+// same as saying it out loud. Comparing two people's availability
+// (dayAnalysis, the day sheet, playdate matching...) only works if
+// that's converted into a SHARED instant first -- these three
+// functions are the only place that conversion happens; everything
+// else keeps working in plain hour-of-day numbers, now correct ones.
+//
+// No library: Intl.DateTimeFormat already carries the IANA tz
+// database every browser ships, which is all zonedWallClockToUtc()
+// needs -- format a UTC guess into the zone's own wall clock, see how
+// far off that landed, and correct (twice, to settle a DST edge).
+function tzOf(personId){
+  var p = personById(personId);
+  return (p && p.timezone) || myTimezoneGuess();
+}
+var _tzGuess = null;
+function myTimezoneGuess(){
+  if (_tzGuess) return _tzGuess;
+  try { _tzGuess = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (e) { _tzGuess = 'UTC'; }
+  return _tzGuess;
+}
+function tzOffsetMinutesAt(tz, utcMs){
+  try {
+    var dtf = new Intl.DateTimeFormat('en-US', { timeZone:tz, hourCycle:'h23',
+      year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    var parts = dtf.formatToParts(new Date(utcMs)).reduce(function(a, x){ a[x.type] = x.value; return a; }, {});
+    var asIfUtc = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour === 24 ? 0 : +parts.hour, +parts.minute, +parts.second);
+    return (asIfUtc - utcMs) / 60000;
+  } catch (e) { return 0; }   // an invalid/unrecognized zone name degrades to UTC rather than throwing mid-render
+}
+// The UTC instant for wall-clock `hour` (fractional hours ok) on
+// `dateStr` (YYYY-MM-DD) in `tz`.
+function zonedWallClockToUtc(dateStr, hour, tz){
+  var d = parseDate(dateStr), h = Math.floor(hour), m = Math.round((hour - h) * 60);
+  var guess = Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), h, m, 0);
+  for (var i = 0; i < 2; i++) {
+    var off = tzOffsetMinutesAt(tz, guess);
+    var next = Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), h, m, 0) - off * 60000;
+    if (next === guess) break;
+    guess = next;
+  }
+  return guess;
+}
+// Converts a [start,end) wall-clock window owned by `ownerTz` on
+// `ownerDate` into hours relative to `viewerDate`'s own midnight in
+// `viewerTz` -- e.g. a window entirely before that midnight comes back
+// negative, entirely after comes back > 24; the caller clips to
+// whatever range it's actually drawing (HMIN..HMAX already does this
+// naturally for the day grid).
+function convertWindowToViewerDay(ownerDate, start, end, ownerTz, viewerTz, viewerDate){
+  if (ownerTz === viewerTz) return { start:start, end:end };
+  var viewerMidnightUtc = zonedWallClockToUtc(viewerDate, 0, viewerTz);
+  var startUtc = zonedWallClockToUtc(ownerDate, start, ownerTz);
+  var endUtc = zonedWallClockToUtc(ownerDate, end, ownerTz);
+  return { start:(startUtc - viewerMidnightUtc) / 3600000, end:(endUtc - viewerMidnightUtc) / 3600000 };
+}
+// Forward owner-wall-clock -> target-zone wall-clock, for DISPLAYING a
+// plan/event's time to someone else -- not grid placement (above),
+// which is anchored to a fixed day's hour columns; this just answers
+// "what time is that, for them."
+function convertDateTimeToZone(dateStr, hour, fromTz, toTz){
+  if (fromTz === toTz) return { date:dateStr, hour:hour };
+  var utcMs = zonedWallClockToUtc(dateStr, hour, fromTz);
+  var off = tzOffsetMinutesAt(toTz, utcMs);
+  var ld = new Date(utcMs + off * 60000);
+  // dstrFromDate() reads LOCAL getters (matching parseDate()'s own
+  // local constructor, same pairing used everywhere else in this
+  // file) -- feeding it a Date.UTC(...) value here would silently
+  // shift the date by this browser's own UTC offset. new Date(y,m,d)
+  // (the local constructor) on the UTC-read y/m/d keeps it correct
+  // regardless of what zone the browser itself happens to be in.
+  return { date: dstrFromDate(new Date(ld.getUTCFullYear(), ld.getUTCMonth(), ld.getUTCDate())),
+           hour: ld.getUTCHours() + ld.getUTCMinutes() / 60 };
+}
+// A plan/event's window, converted from its owner's zone into
+// `viewer`'s. If the conversion pushes the end past the viewer's
+// local midnight (a plan near midnight, crossing a wide enough zone
+// gap -- rare), the end is clamped to midnight rather than spilling
+// into "25:00" or a second date, which fmtRange()/hourLabel() have no
+// notation for.
+function ownerWindowForViewer(dateStr, start, end, ownerId, viewer){
+  var fromTz = tzOf(ownerId), toTz = tzOf(viewer);
+  if (fromTz === toTz) return { date:dateStr, start:start, end:end };
+  var s = convertDateTimeToZone(dateStr, start, fromTz, toTz);
+  var e = convertDateTimeToZone(dateStr, end, fromTz, toTz);
+  return { date:s.date, start:s.hour, end: e.date === s.date ? e.hour : 24 };
+}
+// Common zones for the datalist in My profile -- free text otherwise
+// accepts any IANA name, this is just what's offered up front.
+var COMMON_TIMEZONES = [
+  'Pacific/Honolulu', 'America/Anchorage', 'America/Los_Angeles', 'America/Vancouver', 'America/Phoenix',
+  'America/Denver', 'America/Edmonton', 'America/Chicago', 'America/Winnipeg', 'America/Mexico_City',
+  'America/New_York', 'America/Toronto', 'America/Halifax', 'America/St_Johns', 'America/Sao_Paulo',
+  'UTC', 'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Madrid', 'Europe/Athens', 'Europe/Moscow',
+  'Africa/Johannesburg', 'Asia/Dubai', 'Asia/Kolkata', 'Asia/Bangkok', 'Asia/Shanghai', 'Asia/Tokyo',
+  'Asia/Seoul', 'Australia/Perth', 'Australia/Sydney', 'Pacific/Auckland'
+];
+
 /* ---------------- DATA ---------------- */
 // An availability BLOCK says "I'm free from `start` to `end` on `date`",
 // optionally repeating every week on that same weekday from that date on.
@@ -625,16 +725,41 @@ function blockPlace(b, ownerId, date, viewer){
   var label = b.area || tripAreaOn(ownerId, date) || areaOf(ownerId);
   return label ? { key:townOf(label), label:label } : null;
 }
+// Every block this person has that lands on the VIEWER's `date`, once
+// each block's own wall-clock window (in ITS owner's zone) is
+// converted into the viewer's zone -- same zone is the identity
+// conversion (and the far more common case), so that path skips the
+// zone math and the owner-date widening entirely. Shared by hourDetail
+// and placeLabelFor so the "does this land on `date` for the viewer"
+// logic exists in exactly one place.
+function blocksOnViewerDate(personId, date, viewer){
+  var p = personById(personId), out = [];
+  if (!p) return out;
+  var viewerTz = tzOf(viewer), ownerTz = tzOf(personId), sameZone = viewerTz === ownerTz;
+  var ownerDates = sameZone ? [date] : [addDaysStr(date, -1), date, addDaysStr(date, 1)];
+  ownerDates.forEach(function(oDate){
+    p.blocks.forEach(function(b){
+      if (!blockApplies(b, oDate) || !canSee(b, personId, viewer)) return;
+      var win = sameZone ? { start:b.start, end:b.end } : convertWindowToViewerDay(oDate, b.start, b.end, ownerTz, viewerTz, date);
+      if (win.end <= HMIN || win.start >= HMAX) return;   // converted window misses `date`'s displayed grid entirely
+      out.push({ block:b, ownerDate:oDate, win:win });
+    });
+  });
+  return out;
+}
 // Per hour: level (0 none, 1 open, 2 free) and place key (null = unknown / can travel).
 function hourDetail(personId, date, viewer){
   viewer = viewer || viewerId;
-  var lv = [], ar = [], lab = {}, p = personById(personId);
+  var lv = [], ar = [], lab = {};
   for (var h = HMIN; h < HMAX; h++) { lv.push(0); ar.push(null); }
-  p.blocks.forEach(function(b){
-    if (!blockApplies(b, date) || !canSee(b, personId, viewer)) return;
-    var pl = blockPlace(b, personId, date, viewer), L = blockLevel(b);
+  blocksOnViewerDate(personId, date, viewer).forEach(function(x){
+    var pl = blockPlace(x.block, personId, x.ownerDate, viewer), L = blockLevel(x.block);
     if (pl) lab[pl.key] = pl.label;
-    for (var h = Math.max(b.start, HMIN); h < Math.min(b.end, HMAX); h++) {
+    // floor/ceil, not a bare clip -- a zone whose offset isn't a whole
+    // number of hours (India, parts of Australia...) would otherwise
+    // land on a fractional array index and silently vanish from the
+    // hour grid instead of rounding into the nearest whole hour.
+    for (var h = Math.max(Math.floor(x.win.start), HMIN); h < Math.min(Math.ceil(x.win.end), HMAX); h++) {
       if (L >= lv[h - HMIN]) { lv[h - HMIN] = L; ar[h - HMIN] = pl ? pl.key : null; }   // the more available block wins the hour
     }
   });
@@ -645,13 +770,12 @@ function hourStates(personId, date, viewer){ return hourDetail(personId, date, v
 function placeLabelFor(personId, date, viewer){
   viewer = viewer || viewerId;
   var seen = {}, out = [], trav = false, rem = false;
-  personById(personId).blocks.forEach(function(b){
-    if (!blockApplies(b, date) || !canSee(b, personId, viewer)) return;
-    var pl = blockPlace(b, personId, date, viewer);
+  blocksOnViewerDate(personId, date, viewer).forEach(function(x){
+    var b = x.block, pl = blockPlace(b, personId, x.ownerDate, viewer);
     if (b.remote) { rem = true; return; }                            // no location at all -- nothing to show a base for
     if (b.travel) {                                                  // still show where they're based, if they share it
       trav = true;
-      var base = (personId !== viewer && !canSeeArea(personId, viewer)) ? '' : (b.area || tripAreaOn(personId, date) || areaOf(personId));
+      var base = (personId !== viewer && !canSeeArea(personId, viewer)) ? '' : (b.area || tripAreaOn(personId, x.ownerDate) || areaOf(personId));
       pl = base ? { key:townOf(base), label:base } : null;
     }
     if (pl && !seen[pl.key]) { seen[pl.key] = 1; out.push(pl.label); }
@@ -1381,8 +1505,9 @@ function renderPlans(){
       var st = p.rsvps[id];
       return esc(personById(id).name) + ' <span style="color:var(--soft)">(' + (st === 'invited' ? 'no reply' : RSVP_LABEL[st].toLowerCase()) + ')</span>';
     }).join(', ');
+    var pw = ownerWindowForViewer(p.date, p.start, p.end, p.creatorId, viewerId);
     html += '<div class="plan-card" data-plan="' + p.id + '"><div class="t">' + esc(p.title) + '</div>'
-      + '<div class="m">' + longDate(p.date) + ', ' + fmtRange(p.start, p.end) + (p.area ? ', ' + esc(p.area) : '') + (p.spot ? ', at ' + esc(p.spot) : '') + '. Set up by ' + esc(creator.name) + '</div>'
+      + '<div class="m">' + longDate(pw.date) + ', ' + fmtRange(pw.start, pw.end) + (p.area ? ', ' + esc(p.area) : '') + (p.spot ? ', at ' + esc(p.spot) : '') + '. Set up by ' + esc(creator.name) + '</div>'
       + '<div class="m">' + who + '</div>'
       + (p.notes ? '<div class="m">' + esc(p.notes) + '</div>' : '');
     if (p.creatorId !== viewerId) {
@@ -1399,8 +1524,9 @@ function renderPlans(){
     seeing.forEach(function(p){
       var creator = personById(p.creatorId);
       var going = Object.keys(p.rsvps).filter(function(id){ return p.rsvps[id] === 'going'; }).map(function(id){ return esc(personById(id).name); });
+      var pw = ownerWindowForViewer(p.date, p.start, p.end, p.creatorId, viewerId);
       html += '<div class="plan-card" data-plan="' + p.id + '"><div class="t">' + esc(p.title) + '</div>'
-        + '<div class="m">' + longDate(p.date) + ', ' + fmtRange(p.start, p.end) + (p.area ? ', ' + esc(p.area) : '') + '. Set up by ' + esc(creator.name) + '</div>'
+        + '<div class="m">' + longDate(pw.date) + ', ' + fmtRange(pw.start, pw.end) + (p.area ? ', ' + esc(p.area) : '') + '. Set up by ' + esc(creator.name) + '</div>'
         + '<div class="m">' + going.join(', ') + '</div>'
         + '<div class="acts"><button class="btn small" data-plan-join="' + p.id + '">I’m in</button>'
         + '<button class="btn small ghost" data-plan-day="' + p.id + '">See the day</button></div></div>';
@@ -2523,7 +2649,11 @@ function refreshAllSources(){
   return Promise.all(jobs).then(function(){ renderCalendar(); renderBadges(); if (document.getElementById('src-list')) renderLocal('sources'); });
 }
 setInterval(refreshAllSources, 30 * 60 * 1000);      // while the page is open; checking while it's closed needs the backend
-function evTime(ev){ return ev.allDay ? 'All day' : fmtRange(ev.start, ev.end); }
+function evTime(ev){
+  if (ev.allDay) return 'All day';
+  var w = ownerWindowForViewer(ev.date, ev.start, ev.end, ev.by, viewerId);
+  return fmtRange(w.start, w.end);
+}
 function evFrom(ev){
   if (ev.src) { var s = SOURCES.filter(function(x){ return x.id === ev.src; })[0]; return 'From ' + esc(s ? s.name : 'a followed calendar'); }
   return 'Added by ' + esc(personById(ev.by).name);
@@ -3215,6 +3345,9 @@ function renderAreaTab(card, me, tabs){
     + '<div style="margin-bottom:8px">' + tabs + '</div>'
     + '<div class="field"><label>Where you are (town or neighbourhood)</label><input type="text" id="area-me" maxlength="60" value="' + esc(me.area || '') + '" placeholder="e.g. Rossland, BC"/></div>'
     + '<label class="check"><input type="checkbox" id="area-share"' + (me.shareArea !== false ? ' checked' : '') + '/> Friends can see my area</label>'
+    + '<div class="field"><label>Your time zone</label><input type="text" id="area-tz" maxlength="60" list="tz-list" autocomplete="off" value="' + esc(me.timezone || myTimezoneGuess()) + '"/>'
+      + '<datalist id="tz-list">' + COMMON_TIMEZONES.map(function(z){ return '<option value="' + esc(z) + '"></option>'; }).join('') + '</datalist></div>'
+    + '<div style="font-size:12px;color:var(--soft);margin:-4px 0 8px">Set automatically from this device. Change it if you’re usually somewhere else, so friends in other zones see your free time at the right time for them.</div>'
     + '<div class="sec">Trips and travel</div>'
     + '<div style="font-size:13px;color:var(--soft);margin-bottom:6px">Away for a few days? Free time you offer on those dates is in that town, so friends there can see you’re around and friends at home know you’re not.</div>'
     + (tripsOf(me.id).length ? tripsOf(me.id).slice().sort(function(a, b){ return a.start < b.start ? -1 : 1; }).map(function(t){
@@ -3240,13 +3373,16 @@ function renderAreaTab(card, me, tabs){
   });
   function commitArea(){
     var newShare = document.getElementById('area-share').checked;
+    var newTz = document.getElementById('area-tz').value.trim() || myTimezoneGuess();
     var changed = document.getElementById('area-me').value.trim() !== me.area;
     var shareChanged = newShare !== (me.shareArea !== false);
-    me.area = document.getElementById('area-me').value.trim(); me.shareArea = newShare;
+    var tzChanged = newTz !== (me.timezone || myTimezoneGuess());
+    me.area = document.getElementById('area-me').value.trim(); me.shareArea = newShare; me.timezone = newTz;
     if (changed) syncMyCoreProfile();
-    // share_area has no equivalent in ActionSync's own profiles table --
-    // it lives in friend_calendar_profiles alongside taste/avoids/colour.
-    if (shareChanged) syncMyProfile();
+    // share_area/timezone have no equivalent in ActionSync's own
+    // profiles table -- they live in friend_calendar_profiles alongside
+    // taste/avoids/colour.
+    if (shareChanged || tzChanged) syncMyProfile();
   }
   document.getElementById('taste-done').addEventListener('click', function(){ commitArea(); searchArea = null; closeSheet(); renderAll(); });
 }
@@ -3540,6 +3676,7 @@ function loadPeopleAndGroups(){
             p.taste = row.taste || {};
             p.avoids = row.avoids || {};
             p.kids = row.kids || [];
+            p.timezone = row.timezone || null;
             p.shareArea = row.share_area !== false;   // missing row (nobody's saved yet) defaults to shared, same as canSeeArea()'s own default
             (row.custom_items || []).forEach(function(c){
               if (!CATALOG.some(function(x){ return x[0] === c[0]; })) CATALOG.push(c);
@@ -3832,7 +3969,7 @@ function syncMyProfile(){
     sb.from('friend_calendar_profiles').upsert({
       user_id: viewerId, color: me.color, taste: me.taste || {}, avoids: me.avoids || {},
       custom_items: CATALOG.filter(function(c){ return c[0].indexOf('c:') === 0; }),
-      share_area: me.shareArea !== false, kids: me.kids || [],
+      share_area: me.shareArea !== false, kids: me.kids || [], timezone: me.timezone || null,
       updated_at: new Date().toISOString()
     }, { onConflict: 'user_id' }).then(function(r){
       if (r.error) console.warn('[friend-calendar] profile save failed:', r.error.message);
@@ -3861,6 +3998,12 @@ function syncMyCoreProfile(){
 function boot(){
   document.getElementById('auth-gate').style.display = 'none';
   loadPeopleAndGroups().then(function(){
+    // First time the app's been opened on this account: nobody set a
+    // zone, so silently save what the browser already knows rather
+    // than making that a setup step -- "My profile" still has it, for
+    // anyone whose device zone isn't where they actually live.
+    var me = personById(viewerId);
+    if (me && !me.timezone) { me.timezone = myTimezoneGuess(); syncMyProfile(); }
     renderAll();
     handleAddFromLink();
   });
@@ -3889,10 +4032,13 @@ function seedDemoData(){
   viewerId = 'demo-me';
   PEOPLE = [
     { id:'demo-me', name:'Alex (demo)', color:PERSON_COLORS[0], area:'Rossland, BC', shareArea:true, blocks:[], taste:{}, avoids:{},
-      kids:[{ id:'demo-kid-1', name:'Mia', age:'4', note:'Naps 1-3pm. No nuts.' }] },
+      timezone:'America/Vancouver', kids:[{ id:'demo-kid-1', name:'Mia', age:'4', note:'Naps 1-3pm. No nuts.' }] },
     { id:'demo-jess', name:'Jess', color:PERSON_COLORS[1], area:'Nelson, BC', shareArea:true, blocks:[],
-      kids:[{ id:'demo-kid-2', name:'Theo', age:'5', note:'Loves dinosaurs and the splash pad.' }] },
-    { id:'demo-sam', name:'Sam', color:PERSON_COLORS[2], area:'', shareArea:true, blocks:[] }
+      timezone:'America/Vancouver', kids:[{ id:'demo-kid-2', name:'Theo', age:'5', note:'Loves dinosaurs and the splash pad.' }] },
+    // Three zones east of Alex/Jess -- try the day sheet lanes or
+    // "Set something up" with Sam counted to see 6pm his time land as
+    // 9pm here.
+    { id:'demo-sam', name:'Sam', color:PERSON_COLORS[2], area:'', shareArea:true, blocks:[], timezone:'America/Toronto' }
   ];
   GROUPS = [ { id:'demo-g1', name:'Ski crew', memberIds:['demo-me', 'demo-jess', 'demo-sam'] } ];
   GROUPS.forEach(ensureGroupThread);   // syncNewThread() no-ops: AS.auth.client() is stubbed to null above
