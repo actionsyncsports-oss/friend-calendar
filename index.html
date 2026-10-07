@@ -268,7 +268,7 @@
 
 <div id="plans"></div>
 
-<div id="disclaimer">Your crew, groups, free time and messages come from ActionSync. Plans are still local to this device &mdash; syncing those is next.</div>
+<div id="disclaimer">Your crew, groups, free time, plans, events and messages all come from ActionSync now.</div>
 <div id="toast"></div>
 
 <div class="sheet-bg" id="sheet-bg"><div class="sheet-card" id="sheet-card"></div></div>
@@ -1213,14 +1213,20 @@ function renderPlanForm(date, start, end, whoIds, openIds, place){
     } else if (vis === 'pick') {
       visibleTo = Array.from(document.querySelectorAll('.plan-vis-who:checked')).map(function(cb){ return cb.value; });
     }
-    PLANS.push({ id:newId('plan'), date:date, start:s, end:e, title:title, item: document.getElementById('plan-item').value || null, area: document.getElementById('plan-where').value.trim(),
-                 spot: document.getElementById('plan-spot').value.trim(), notes: document.getElementById('plan-notes').value.trim(), creatorId:viewerId, rsvps:rsvps, visibleTo:visibleTo });
+    var plan = { id:newId('plan'), date:date, start:s, end:e, title:title, item: document.getElementById('plan-item').value || null, area: document.getElementById('plan-where').value.trim(),
+                 spot: document.getElementById('plan-spot').value.trim(), notes: document.getElementById('plan-notes').value.trim(), creatorId:viewerId, rsvps:rsvps, visibleTo:visibleTo,
+                 createdAt:nowIso(), rsvpUpdatedAt:{} };
+    PLANS.push(plan);
     // The creator is auto-"going" (rsvps set above) -- they're committed
     // to this slot now, so it stops showing as free for anything else.
     consumeAvailability(viewerId, date, s, e);
-    announcePlan(PLANS[PLANS.length - 1]);
     renderCalendar(); renderPlans(); renderBadges();
-    renderPlanSent(PLANS[PLANS.length - 1]);
+    renderPlanSent(plan);
+    // The plan's own chat is a thread whose plan_id FK points at this
+    // row -- it has to exist server-side first, so announcePlan() (which
+    // creates that thread) waits for the plan sync instead of firing in
+    // parallel with it.
+    syncPlanCreate(plan).then(function(){ announcePlan(plan); renderBadges(); });
   });
 }
 
@@ -1249,14 +1255,16 @@ function canSeePlan(plan, who){
 }
 // Someone who could see a plan but wasn't invited taps in -- not asking
 // permission, just joining, same as the RSVP "going" path already does
-// for an invited person (consumes their availability, notifies the
-// creator -- "Jim joined your plan" rather than "Jim wants to join").
+// for an invited person (consumes their availability). Doesn't add
+// them to the plan's own thread -- that thread's member list is fixed
+// at creation (nothing grants a non-member write access to someone
+// else's thread row), so they see the plan and who's going, but not
+// that specific chat, until there's a real "add a member" flow.
 function joinPlan(plan, who){
   plan.rsvps[who] = 'going';
+  plan.rsvpUpdatedAt = plan.rsvpUpdatedAt || {}; plan.rsvpUpdatedAt[who] = nowIso();
   consumeAvailability(who, plan.date, plan.start, plan.end);
-  notify(plan.creatorId, 'rsvp', personById(who).name + ' joined: ' + plan.title, { date:plan.date });
-  var t = threadForPlan(plan);
-  if (t) { t.memberIds.push(who); t.messages.push({ id:newId('m'), from:null, sys:true, ts:nowIso(), text:personById(who).name + ' joined.' }); }
+  if (who === viewerId) syncPlanRsvp(plan, who, 'going');
 }
 function threadForPlan(plan){ return THREADS.filter(function(t){ return t.planId === plan.id; })[0]; }
 function openPlanChat(plan){ var t = threadForPlan(plan); if (!t) return; renderThread(t.id); openSheet(); renderBadges(); }
@@ -1272,12 +1280,16 @@ function renderPlanSent(plan){
 }
 function cancelPlan(plan){
   var t = threadForPlan(plan);
-  if (t) t.messages.push({ id:newId('m'), from:null, sys:true, ts:nowIso(), text:personById(plan.creatorId).name + ' cancelled this plan.' });
-  Object.keys(plan.rsvps).forEach(function(i){ if (i !== plan.creatorId) notify(i, 'invite', personById(plan.creatorId).name + ' cancelled: ' + plan.title + ', ' + longDate(plan.date), { thread: t ? t.id : null, date:plan.date }); });
+  if (t) sendMessage(t, null, personById(plan.creatorId).name + ' cancelled this plan.', true);
   // Everyone who was committed ("going") gets that slot back -- the plan
-  // that was holding it no longer exists.
+  // that was holding it no longer exists. restoreAvailability() only
+  // SYNCS for the viewer's own id (RLS wouldn't allow writing anyone
+  // else's blocks anyway) -- calling it for everyone still keeps what
+  // you see of their calendar locally consistent right away, rather
+  // than looking consumed until their own session refreshes.
   Object.keys(plan.rsvps).forEach(function(i){ if (plan.rsvps[i] === 'going') restoreAvailability(i, plan.date, plan.start, plan.end); });
   PLANS = PLANS.filter(function(x){ return x.id !== plan.id; });
+  syncPlanDelete(plan.id);
 }
 
 /* ---------------- PLANS LIST + RSVP ---------------- */
@@ -1346,10 +1358,12 @@ function renderPlans(){
       var plan = PLANS.filter(function(x){ return x.id === b.dataset.plan; })[0];
       var was = plan.rsvps[viewerId];
       plan.rsvps[viewerId] = b.dataset.rsvp;
+      plan.rsvpUpdatedAt = plan.rsvpUpdatedAt || {}; plan.rsvpUpdatedAt[viewerId] = nowIso();
       // Going means committed -- that slot stops showing as free for
       // anything else. Backing off "going" gives it back.
       if (b.dataset.rsvp === 'going' && was !== 'going') consumeAvailability(viewerId, plan.date, plan.start, plan.end);
       else if (b.dataset.rsvp !== 'going' && was === 'going') restoreAvailability(viewerId, plan.date, plan.start, plan.end);
+      syncPlanRsvp(plan, viewerId, b.dataset.rsvp);
       announceRsvp(plan, viewerId, b.dataset.rsvp);
       renderCalendar(); renderPlans(); renderBadges();
     });
@@ -1530,7 +1544,7 @@ document.getElementById('actionsync-sync-btn').addEventListener('click', functio
   window.alert('Not built yet. Syncing with your ActionSync calendar is a planned later step — for now, this calendar lives only in this prototype.');
 });
 
-// Reload rather than hand-resetting PEOPLE/GROUPS/PLANS/THREADS/NOTIFS etc.
+// Reload rather than hand-resetting PEOPLE/GROUPS/PLANS/THREADS etc.
 // individually -- a fresh load re-runs the exact same boot path a signed-out
 // visitor already gets (AS.auth.ready() -> no session -> auth gate), so
 // there's no separate "reset" logic to keep in sync with that path.
@@ -1540,11 +1554,10 @@ document.getElementById('signout-btn').addEventListener('click', function(){
 
 /* ---------------- MESSAGES + ALERTS ---------------- */
 // Threads: 'group' (one per calendar group), 'plan' (one per plan, members = everyone invited), 'chat' (anyone you pick).
-// Everything is in-memory and local to this page. Real delivery to a friend's phone (chat, push, text, email)
-// needs the backend; here "alerts" are the in-app list each person would see.
-var THREADS = [];          // { id, kind, title, memberIds, planId, messages:[{id, from, text, ts, sys}], read:{personId:count}, muted:{personId:true} }
-var NOTIFS = [];           // { id, to, type, text, ts, read, ref:{thread|date}, n }
-var NOTIF_PREFS = {};      // personId -> { invite, rsvp, message, freeday }  (true = on)
+// All synced now (friend_calendar_threads/messages). "Alerts" has no
+// table of its own -- see liveAlerts() further down.
+var THREADS = [];          // { id, kind, title, memberIds, planId, groupId, messages:[{id, from, text, ts, sys}], read:{personId:isoTs}, muted:{personId:true} }
+var NOTIF_PREFS = {};      // personId -> { invite, rsvp, message, freeday }  (true = on) -- local-only, never synced
 var DISMISSED = {};        // 'personId|key' -> true, for free-day nudges
 var NOTIF_TYPES = [ ['event','Events friends add'], ['invite','Invites to plans'], ['rsvp','Replies to plans I set up'], ['message','New messages'], ['freeday','Days when a group is free'] ];
 function prefsOf(id){ if (!NOTIF_PREFS[id]) NOTIF_PREFS[id] = { event:true, invite:true, rsvp:true, message:true, freeday:true }; return NOTIF_PREFS[id]; }
@@ -1556,10 +1569,11 @@ function fmtTs(iso){
   if (dstrFromDate(d) === dstrFromDate(n)) return clock;
   return MONTHS[d.getMonth()].slice(0, 3) + ' ' + d.getDate() + ', ' + clock;
 }
-// 'chat' and 'group' threads are real, synced rows now (friend_calendar_
-// threads/messages) -- 'plan' threads (the auto-chat announcing a plan,
-// with its system messages) stay local/simulated, same as plans
-// themselves, which aren't synced yet either.
+// Every kind of thread -- 'chat', 'group', and 'plan' -- is a real,
+// synced row now (friend_calendar_threads/messages). "Alerts" for
+// invites/RSVPs/events are computed live from plans/events/messages
+// (liveAlerts(), further down) instead of being their own stored
+// notification rows, the same way nudgesFor() already works.
 function newThread(kind, title, memberIds, extra){
   var t = { id:newId('th'), kind:kind, title:title, memberIds:memberIds.slice(), messages:[], read:{}, muted:{} };
   if (extra) Object.keys(extra).forEach(function(k){ t[k] = extra[k]; });
@@ -1568,26 +1582,26 @@ function newThread(kind, title, memberIds, extra){
   return t;
 }
 function syncNewThread(t){
-  if (t.kind === 'plan' || !(window.AS && AS.auth)) return;
+  if (!(window.AS && AS.auth)) return Promise.resolve();
   var sb = AS.auth.client();
-  if (!sb) return;
-  sb.from('friend_calendar_threads').insert({
+  if (!sb) return Promise.resolve();
+  return sb.from('friend_calendar_threads').insert({
     id:t.id, kind:t.kind, title:t.title || null, member_ids:t.memberIds,
-    group_id:t.groupId || null, created_by:viewerId
+    group_id:t.groupId || null, plan_id:t.planId || null, created_by:viewerId
   }).then(function(r){
     // A unique-index conflict here means another member's session
-    // created this exact group's thread a moment earlier -- not an
-    // error, just means our local copy will get replaced by theirs
+    // created this exact group/plan's thread a moment earlier -- not
+    // an error, just means our local copy will get replaced by theirs
     // next time threads refresh.
     if (r.error && r.error.code !== '23505') console.warn('[friend-calendar] thread create failed:', r.error.message);
   });
 }
 function syncMessageInsert(t, m){
-  if (t.kind === 'plan' || m.sys || !(window.AS && AS.auth)) return;
+  if (!(window.AS && AS.auth)) return;
   var sb = AS.auth.client();
   if (!sb) return;
   sb.from('friend_calendar_messages').insert({
-    id:m.id, thread_id:t.id, from_user_id:m.from, text:m.text, sys:false, created_at:m.ts
+    id:m.id, thread_id:t.id, from_user_id:m.from, text:m.text, sys:!!m.sys, created_at:m.ts
   }).then(function(r){
     if (r.error) console.warn('[friend-calendar] message send failed:', r.error.message);
   });
@@ -1597,7 +1611,7 @@ function syncMessageInsert(t, m){
 // another person's local THREADS entry for them is just a simulated
 // stand-in, not their real session.
 function syncThreadState(t, personId){
-  if (t.kind === 'plan' || personId !== viewerId || !(window.AS && AS.auth)) return;
+  if (personId !== viewerId || !(window.AS && AS.auth)) return;
   var sb = AS.auth.client();
   if (!sb) return;
   sb.from('friend_calendar_thread_state').upsert({
@@ -1631,29 +1645,16 @@ function totalUnread(personId){
 function markRead(t, personId){
   t.read[personId] = t.messages.length ? t.messages[t.messages.length - 1].ts : nowIso();
   syncThreadState(t, personId);
-  NOTIFS.forEach(function(n){ if (n.to === personId && n.ref && n.ref.thread === t.id) n.read = true; });
-}
-function notify(to, type, text, ref){
-  if (!prefsOf(to)[type]) return;                                   // that person turned this kind off
-  if (type === 'message' && ref && ref.thread && threadById(ref.thread).muted[to]) return;
-  if (type === 'message') {                                         // several messages in a row become one alert
-    var open = NOTIFS.filter(function(n){ return n.to === to && n.type === 'message' && !n.read && n.ref && n.ref.thread === ref.thread; })[0];
-    if (open) { open.n++; open.text = open.n + ' new messages in ' + open.base; open.ts = nowIso(); return; }
-  }
-  NOTIFS.push({ id:newId('nt'), to:to, type:type, text:text, ts:nowIso(), read:false, ref:ref || null, n:1, base: ref && ref.base });
 }
 function sendMessage(t, from, text, sys, ts){
   text = String(text || '').trim().slice(0, 600);
   if (!text) return null;
   var m = { id:newId('m'), from: sys ? null : from, text:text, ts: ts || nowIso(), sys:!!sys };
   t.messages.push(m);
+  syncMessageInsert(t, m);
   if (!sys) {
     t.read[from] = m.ts;                                            // sending counts as having read everything so far
     if (from === viewerId) syncThreadState(t, viewerId);
-    syncMessageInsert(t, m);
-    t.memberIds.forEach(function(i){
-      if (i !== from) notify(i, 'message', personById(from).name + ' in ' + threadTitle(t, i) + ': ' + text.slice(0, 60), { thread:t.id, base:threadTitle(t, i) });
-    });
   }
   return m;
 }
@@ -1664,7 +1665,6 @@ function ensureGroupThread(g){
   if (THREADS.some(function(t){ return t.groupId === g.id; })) return;
   newThread('group', g.name, g.memberIds, { groupId:g.id });
 }
-NOTIFS.length = 0;
 
 // "Everyone's free" nudges: derived live from the calendars, never stored. Respects what each person can see.
 function nudgesFor(personId){
@@ -1684,8 +1684,57 @@ function nudgesFor(personId){
   });
   return prefsOf(personId).freeday ? out : [];
 }
+// "Alerts" has no stored notification rows -- every kind here is
+// computed live from plans/events/messages, which are all real synced
+// data now, the same way nudgesFor() above already works. The only
+// stored state is alertsCursor (one timestamp per user, synced via
+// friend_calendar_alert_state): "new since you last checked," used
+// only for rsvp/event (an unanswered invite just shows until you
+// answer it; unread messages already have their own per-thread cursor).
+var alertsCursor = '1970-01-01T00:00:00.000Z';
+function liveAlerts(personId){
+  var prefs = prefsOf(personId), out = [];
+  if (prefs.invite) {
+    PLANS.filter(function(p){ return p.rsvps[personId] === 'invited'; }).forEach(function(p){
+      out.push({ kind:'invite', ts:p.createdAt || '', text: personById(p.creatorId).name + ' invited you: ' + p.title + ', ' + longDate(p.date), ref:{ date:p.date } });
+    });
+  }
+  if (prefs.rsvp) {
+    PLANS.filter(function(p){ return p.creatorId === personId; }).forEach(function(p){
+      Object.keys(p.rsvps).forEach(function(who){
+        if (who === personId) return;
+        var st = p.rsvps[who], at = (p.rsvpUpdatedAt && p.rsvpUpdatedAt[who]) || '';
+        if (st === 'invited' || !at || at <= alertsCursor) return;
+        var verb = { going:'is going', maybe:'might come', no:'can’t make it' }[st] || st;
+        var t = threadForPlan(p);
+        out.push({ kind:'rsvp', ts:at, text: personById(who).name + ' ' + verb + ': ' + p.title, ref:{ thread: t ? t.id : null, date:p.date } });
+      });
+    });
+  }
+  if (prefs.event) {
+    EVENTS.filter(function(e){ return e.by !== personId && eventVisible(e, personId) && e.createdAt && e.createdAt > alertsCursor; }).forEach(function(e){
+      out.push({ kind:'event', ts:e.createdAt, text: personById(e.by).name + ' added an event: ' + e.title + ', ' + longDate(e.date), ref:{ date:e.date } });
+    });
+  }
+  if (prefs.message) {
+    THREADS.filter(function(t){ return t.memberIds.indexOf(personId) !== -1 && !t.muted[personId]; }).forEach(function(t){
+      var n = unreadIn(t, personId);
+      if (n) out.push({ kind:'message', ts: t.messages[t.messages.length - 1].ts, text: n + ' new message' + (n > 1 ? 's' : '') + ' in ' + threadTitle(t, personId), ref:{ thread:t.id } });
+    });
+  }
+  out.sort(function(a, b){ return a.ts < b.ts ? 1 : a.ts > b.ts ? -1 : 0; });
+  return out;
+}
+function syncAlertSeen(){
+  alertsCursor = nowIso();
+  if (!(window.AS && AS.auth)) return;
+  var sb = AS.auth.client();
+  if (!sb) return;
+  sb.from('friend_calendar_alert_state').upsert({ user_id:viewerId, seen_until:alertsCursor }, { onConflict:'user_id' })
+    .then(function(r){ if (r.error) console.warn('[friend-calendar] alert state save failed:', r.error.message); });
+}
 function unreadAlerts(personId){
-  return NOTIFS.filter(function(n){ return n.to === personId && !n.read; }).length + nudgesFor(personId).length;
+  return liveAlerts(personId).length + nudgesFor(personId).length;
 }
 function renderBadges(){
   var m = totalUnread(viewerId), a = unreadAlerts(viewerId);
@@ -1744,7 +1793,7 @@ function pollThread(id){
   _msgPollTimer = setInterval(function(){
     if (openThreadId !== id || !(window.AS && AS.auth)) return;
     var sb = AS.auth.client(); if (!sb) return;
-    var t = threadById(id); if (!t || t.kind === 'plan') return;
+    var t = threadById(id); if (!t) return;
     var since = t.messages.length ? t.messages[t.messages.length - 1].ts : '1970-01-01T00:00:00Z';
     sb.from('friend_calendar_messages').select('*').eq('thread_id', id).gt('created_at', since).order('created_at', { ascending:true })
       .then(function(r){
@@ -1775,8 +1824,7 @@ function renderThread(id){
     + '<div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
     + '<button class="btn ghost" id="thread-back">All messages</button>'
     + (plan ? '<button class="btn ghost" id="thread-day">See the day</button>' : '')
-    + '<button class="btn ghost" id="thread-mute">' + (t.muted[viewerId] ? 'Unmute' : 'Mute') + '</button></div>'
-    + (t.kind === 'plan' ? '<div style="font-size:12px;color:var(--soft);margin-top:6px">This chat is about a plan, and plans aren’t synced yet -- it stays on this device for now.</div>' : '');
+    + '<button class="btn ghost" id="thread-mute">' + (t.muted[viewerId] ? 'Unmute' : 'Mute') + '</button></div>';
   card.innerHTML = html;
   var box = document.getElementById('msgs'); box.scrollTop = box.scrollHeight;
   function send(){
@@ -1789,7 +1837,7 @@ function renderThread(id){
   document.getElementById('thread-mute').addEventListener('click', function(){ t.muted[viewerId] = !t.muted[viewerId]; syncThreadState(t, viewerId); renderThread(id); });
   if (plan) document.getElementById('thread-day').addEventListener('click', function(){ var d = parseDate(plan.date); closeSheet(); setViewMonth(d.getFullYear(), d.getMonth()); openDay(plan.date); });
   renderBadges();
-  if (t.kind !== 'plan') pollThread(id);
+  pollThread(id);
 }
 function renderNewChat(){
   var card = document.getElementById('sheet-card');
@@ -1808,16 +1856,29 @@ function renderNewChat(){
     renderThread(t.id);
   });
 }
+// Opens instantly with whatever's already loaded, then refreshes
+// plans/events in the background and re-renders if the list is still
+// what's on screen -- same pattern as renderMessages()/refreshThreads().
 function renderNotifs(){
-  var prefs = prefsOf(viewerId), nudges = nudgesFor(viewerId);
-  var mine = NOTIFS.filter(function(n){ return n.to === viewerId; }).sort(function(a, b){ return a.ts < b.ts ? 1 : -1; });
+  refreshAlertsData().then(function(){ if (document.getElementById('n-close')) renderNotifsList(); });
+  renderNotifsList();
+}
+function refreshAlertsData(){
+  if (!(window.AS && AS.auth)) return Promise.resolve();
+  var sb = AS.auth.client();
+  if (!sb) return Promise.resolve();
+  return Promise.all([ loadPlans(sb, viewerId), loadEvents(sb, viewerId) ]).then(function(){ renderBadges(); })
+    .catch(function(e){ console.warn('[friend-calendar] alerts refresh failed:', e && e.message); });
+}
+function renderNotifsList(){
+  var prefs = prefsOf(viewerId), nudges = nudgesFor(viewerId), mine = liveAlerts(viewerId);
   var html = '<h4>Alerts</h4>';
   nudges.forEach(function(n){
     html += '<div class="nudge"><b>' + (n.solid ? 'Everyone' : 'Everyone, at least open,') + ' in ' + esc(n.groupName) + (n.solid ? ' is free ' : ' is around ') + esc(longDate(n.date)) + ', ' + fmtRange(n.start, n.end) + (n.area ? ' in ' + esc(n.area) : '') + '</b>'
       + '<div class="acts"><button class="btn small" data-nudge-open="' + n.date + '">Set something up</button> <button class="btn small danger" data-nudge-dismiss="' + n.key + '">Dismiss</button></div></div>';
   });
   html += mine.length ? mine.map(function(n){
-    return '<div class="nrow' + (n.read ? '' : ' unread') + '" data-nid="' + n.id + '">' + esc(n.text) + '<div class="nt">' + fmtTs(n.ts) + '</div></div>';
+    return '<div class="nrow" data-nkind="' + n.kind + '"' + (n.ref && n.ref.thread ? ' data-nthread="' + n.ref.thread + '"' : '') + (n.ref && n.ref.date ? ' data-ndate="' + n.ref.date + '"' : '') + '>' + esc(n.text) + (n.ts ? '<div class="nt">' + fmtTs(n.ts) + '</div>' : '') + '</div>';
   }).join('') : (nudges.length ? '' : '<div style="color:var(--soft)">Nothing new.</div>');
   html += '<div class="sec">Tell me about</div>' + NOTIF_TYPES.map(function(t){
     return '<label class="check"><input type="checkbox" class="np" value="' + t[0] + '"' + (prefs[t[0]] ? ' checked' : '') + '/> ' + t[1] + '</label>';
@@ -1825,36 +1886,32 @@ function renderNotifs(){
     + '<div style="font-size:12px;color:var(--soft);margin:6px 0">Alerts show up in the app. Pushing them to a phone, text or email needs the backend.</div>'
     + '<button class="btn ghost" id="n-readall">Mark all read</button><button class="btn" id="n-close">Done</button>';
   var card = document.getElementById('sheet-card'); card.innerHTML = html;
-  card.querySelectorAll('[data-nid]').forEach(function(r){
+  card.querySelectorAll('[data-nkind]').forEach(function(r){
     r.addEventListener('click', function(){
-      var n = NOTIFS.filter(function(x){ return x.id === r.dataset.nid; })[0]; n.read = true;
-      if (n.ref && n.ref.thread) renderThread(n.ref.thread);
-      else if (n.ref && n.ref.date) { var d = parseDate(n.ref.date); closeSheet(); setViewMonth(d.getFullYear(), d.getMonth()); openDay(n.ref.date); }
-      else renderNotifs();
-      renderBadges();
+      if (r.dataset.nthread) renderThread(r.dataset.nthread);
+      else if (r.dataset.ndate) { var d = parseDate(r.dataset.ndate); closeSheet(); setViewMonth(d.getFullYear(), d.getMonth()); openDay(r.dataset.ndate); }
     });
   });
   card.querySelectorAll('[data-nudge-open]').forEach(function(b){ b.addEventListener('click', function(){ var d = parseDate(b.dataset.nudgeOpen); closeSheet(); setViewMonth(d.getFullYear(), d.getMonth()); openDay(b.dataset.nudgeOpen); }); });
-  card.querySelectorAll('[data-nudge-dismiss]').forEach(function(b){ b.addEventListener('click', function(){ DISMISSED[viewerId + '|' + b.dataset.nudgeDismiss] = true; renderNotifs(); renderBadges(); }); });
-  card.querySelectorAll('.np').forEach(function(c){ c.addEventListener('change', function(){ prefs[c.value] = c.checked; renderNotifs(); renderBadges(); }); });
-  document.getElementById('n-readall').addEventListener('click', function(){ NOTIFS.forEach(function(n){ if (n.to === viewerId) n.read = true; }); renderNotifs(); renderBadges(); });
+  card.querySelectorAll('[data-nudge-dismiss]').forEach(function(b){ b.addEventListener('click', function(){ DISMISSED[viewerId + '|' + b.dataset.nudgeDismiss] = true; renderNotifsList(); renderBadges(); }); });
+  card.querySelectorAll('.np').forEach(function(c){ c.addEventListener('change', function(){ prefs[c.value] = c.checked; renderNotifsList(); renderBadges(); }); });
+  // Invites disappear once you answer them, and unread messages clear
+  // once you open that thread -- "mark all read" only needs to move
+  // the rsvp/event cursor forward.
+  document.getElementById('n-readall').addEventListener('click', function(){ syncAlertSeen(); renderNotifsList(); renderBadges(); });
   document.getElementById('n-close').addEventListener('click', function(){ closeSheet(); renderAll(); });
 }
-// A plan gets its own chat with everyone invited, and an invite alert for each of them.
+// A plan gets its own chat with everyone invited.
 function announcePlan(plan){
   var members = Object.keys(plan.rsvps), creator = personById(plan.creatorId);
   var t = newThread('plan', plan.title, members, { planId:plan.id });
   sendMessage(t, plan.creatorId, creator.name + ' set this up: ' + plan.title + ', ' + longDate(plan.date) + ', ' + fmtRange(plan.start, plan.end) + (plan.area ? ', ' + plan.area : '') + (plan.spot ? ', at ' + plan.spot : '') + '.', true);
   markRead(t, plan.creatorId);
-  members.forEach(function(i){
-    if (i !== plan.creatorId) notify(i, 'invite', creator.name + ' invited you: ' + plan.title + ', ' + longDate(plan.date), { date:plan.date });
-  });
 }
 function announceRsvp(plan, who, st){
-  var t = THREADS.filter(function(x){ return x.planId === plan.id; })[0];
+  var t = threadForPlan(plan);
   var verb = { going:'is going', maybe:'might come', no:'can’t make it' }[st];
-  if (t) { t.messages.push({ id:newId('m'), from:null, sys:true, ts:nowIso(), text:personById(who).name + ' ' + verb + '.' }); }
-  notify(plan.creatorId, 'rsvp', personById(who).name + ' ' + verb + ': ' + plan.title, { thread: t ? t.id : null, date:plan.date });
+  if (t) sendMessage(t, null, personById(who).name + ' ' + verb + '.', true);
 }
 document.getElementById('msg-btn').addEventListener('click', function(){ renderMessages(); openSheet(); });
 document.getElementById('notif-btn').addEventListener('click', function(){ renderNotifs(); openSheet(); });
@@ -2139,7 +2196,9 @@ function bindDaySheetLocal(date){
   card.querySelectorAll('[data-area]').forEach(function(b){ b.addEventListener('click', function(){ searchArea = b.dataset.area; renderDaySheet(); }); });
   card.querySelectorAll('[data-ev-int]').forEach(function(b){ b.addEventListener('click', function(){
     var ev = EVENTS.filter(function(x){ return x.id === b.dataset.evInt; })[0];
-    if (ev.interested[viewerId]) delete ev.interested[viewerId]; else ev.interested[viewerId] = true;
+    var on = !ev.interested[viewerId];
+    if (on) ev.interested[viewerId] = true; else delete ev.interested[viewerId];
+    if (!ev.src) syncEventInterest(ev.id, on);   // src = auto-imported, never synced
     renderDaySheet();
   }); });
   card.querySelectorAll('[data-ev-plan]').forEach(function(b){ b.addEventListener('click', function(){
@@ -2363,14 +2422,9 @@ function applySourceEvents(src, evs){
                url:safeUrl(x.url) || '', by:src.by, visibleTo:src.visibleTo, interested: prev ? prev.interested : {}, src:src.id, uid:x.uid };
     EVENTS.push(ev); if (!prev) added.push(ev);
   });
-  if (!first && added.length) {
-    PEOPLE.forEach(function(pp){
-      if (pp.id === src.by) return;
-      var vis = added.filter(function(ev){ return eventVisible(ev, pp.id); }); if (!vis.length) return;
-      if (vis.length <= 3) vis.forEach(function(ev){ notify(pp.id, 'event', 'New from ' + src.name + ': ' + ev.title + ', ' + longDate(ev.date), { date:ev.date }); });
-      else notify(pp.id, 'event', vis.length + ' new events from ' + src.name, { date:vis[0].date });
-    });
-  }
+  // Imported events are never synced (see section 68's comment in the
+  // SQL file) -- nobody else's alerts can pick these up, only locally
+  // on this device.
   return added.length;
 }
 // Reads a source (from its address, or from pasted text) and fills in its events. Resolves { ok, msg }.
@@ -2480,9 +2534,9 @@ function bindEventSave(done){
     var vis = document.getElementById('ev-vis').value, visibleTo = 'all';
     if (vis.indexOf('g:') === 0) visibleTo = GROUPS.filter(function(g){ return g.id === vis.slice(2); })[0].memberIds.filter(function(i){ return i !== viewerId; });
     var ev = { id:newId('ev'), title:title, date:date, start:st, end:en, area:document.getElementById('ev-area').value.trim(), item:document.getElementById('ev-item').value,
-               note:document.getElementById('ev-note').value.trim(), url:safeUrl(url), by:viewerId, visibleTo:visibleTo, interested:{} };
+               note:document.getElementById('ev-note').value.trim(), url:safeUrl(url), by:viewerId, visibleTo:visibleTo, interested:{}, createdAt:nowIso() };
     EVENTS.push(ev);
-    PEOPLE.forEach(function(pp){ if (pp.id !== viewerId && eventVisible(ev, pp.id)) notify(pp.id, 'event', personById(viewerId).name + ' added an event: ' + title + ', ' + longDate(date), { date:date }); });
+    syncEventCreate(ev);
     done(ev);
   });
 }
@@ -3394,6 +3448,15 @@ function loadPeopleAndGroups(){
     .catch(function(e){ console.warn('[friend-calendar] blocks load failed:', e && e.message); })
     .then(function(){ return loadGroups(sb, user.id); })
     .catch(function(e){ console.warn('[friend-calendar] groups load failed:', e && e.message); })
+    // Plans, before threads -- a plan's own chat thread references it
+    // by plan_id, so loading plans (and thus knowing which still exist)
+    // before threads keeps that consistent from the first paint.
+    .then(function(){ return loadPlans(sb, user.id); })
+    .catch(function(e){ console.warn('[friend-calendar] plans load failed:', e && e.message); })
+    .then(function(){ return loadEvents(sb, user.id); })
+    .catch(function(e){ console.warn('[friend-calendar] events load failed:', e && e.message); })
+    .then(function(){ return loadAlertState(sb, user.id); })
+    .catch(function(e){ console.warn('[friend-calendar] alert state load failed:', e && e.message); })
     // Threads/messages, after groups so a group that doesn't have its
     // own chat yet (nobody's opened Messages since it was made) gets
     // one created here rather than leaving it permanently missing.
@@ -3415,10 +3478,8 @@ function blockFromRow(row){
 function loadThreads(sb, myId){
   return sb.from('friend_calendar_threads').select('*').contains('member_ids', [myId])
     .then(function(tr){
-      var synced = (tr.data || []).map(threadFromRow);
-      var planThreads = THREADS.filter(function(t){ return t.kind === 'plan'; });
-      THREADS = synced.concat(planThreads);
-      var ids = synced.map(function(t){ return t.id; });
+      THREADS = (tr.data || []).map(threadFromRow);
+      var ids = THREADS.map(function(t){ return t.id; });
       if (!ids.length) return;
       return Promise.all([
         sb.from('friend_calendar_messages').select('*').in('thread_id', ids).order('created_at', { ascending:true }),
@@ -3439,10 +3500,126 @@ function loadThreads(sb, myId){
 }
 function threadFromRow(row){
   return { id:row.id, kind:row.kind, title:row.title || '', memberIds:(row.member_ids || []).slice(),
-    groupId:row.group_id || undefined, messages:[], read:{}, muted:{} };
+    groupId:row.group_id || undefined, planId:row.plan_id || undefined, messages:[], read:{}, muted:{} };
 }
 function messageFromRow(row){
   return { id:row.id, from:row.from_user_id, text:row.text, ts:row.created_at, sys:!!row.sys };
+}
+// Plans/events were purely in-memory too -- an invite, RSVP, or added
+// event never reached anyone else's device. invited_ids seeds a
+// default 'invited' status for anyone who hasn't answered yet (no
+// plan_rsvps row for them at all); an actual row (the creator's own
+// 'going', or anyone who's responded or self-joined) overrides that.
+function loadPlans(sb, myId){
+  return Promise.all([
+    sb.from('friend_calendar_plans').select('*'),
+    sb.from('friend_calendar_plan_rsvps').select('*')
+  ]).then(function(res){
+    var rsvpsByPlan = {};
+    (res[1].data || []).forEach(function(r){ (rsvpsByPlan[r.plan_id] = rsvpsByPlan[r.plan_id] || {})[r.user_id] = r; });
+    PLANS = (res[0].data || []).map(function(row){ return planFromRow(row, rsvpsByPlan[row.id] || {}); });
+  });
+}
+function planFromRow(row, rsvpRowsByUser){
+  var rsvps = {}, rsvpUpdatedAt = {};
+  (row.invited_ids || []).forEach(function(id){ rsvps[id] = 'invited'; });
+  Object.keys(rsvpRowsByUser).forEach(function(id){ rsvps[id] = rsvpRowsByUser[id].status; rsvpUpdatedAt[id] = rsvpRowsByUser[id].updated_at; });
+  return { id:row.id, date:row.date, start:row.start_hour, end:row.end_hour, title:row.title || '',
+    item:row.item || null, area:row.area || '', spot:row.spot || '', notes:row.notes || '',
+    creatorId:row.creator_id, rsvps:rsvps, rsvpUpdatedAt:rsvpUpdatedAt,
+    visibleTo: row.visible_to == null ? 'invited' : row.visible_to, createdAt:row.created_at };
+}
+// Only the creator's own row is written here (RLS: plan_rsvps writes
+// are self-only, same as thread_state) -- everyone else shows as
+// 'invited' by default via invited_ids until THEY write their own row.
+function syncPlanCreate(plan){
+  if (!(window.AS && AS.auth)) return Promise.resolve();
+  var sb = AS.auth.client();
+  if (!sb) return Promise.resolve();
+  var invitedIds = Object.keys(plan.rsvps).filter(function(id){ return id !== plan.creatorId; });
+  return sb.from('friend_calendar_plans').insert({
+    id:plan.id, creator_id:plan.creatorId, date:plan.date, start_hour:plan.start, end_hour:plan.end,
+    title:plan.title || null, item:plan.item || null, area:plan.area || '', spot:plan.spot || '',
+    notes:plan.notes || '', invited_ids:invitedIds, visible_to: plan.visibleTo == null ? 'invited' : plan.visibleTo
+  }).then(function(r){
+    if (r.error) { console.warn('[friend-calendar] plan create failed:', r.error.message); return; }
+    return sb.from('friend_calendar_plan_rsvps').upsert({
+      plan_id:plan.id, user_id:plan.creatorId, status: plan.rsvps[plan.creatorId] || 'going'
+    }, { onConflict:'plan_id,user_id' }).then(function(r2){
+      if (r2.error) console.warn('[friend-calendar] creator rsvp save failed:', r2.error.message);
+    });
+  });
+}
+// Always your own row (RLS wouldn't allow anyone else's) -- used both
+// for an invitee answering and for joinPlan()'s self-join.
+function syncPlanRsvp(plan, who, status){
+  if (who !== viewerId || !(window.AS && AS.auth)) return;
+  var sb = AS.auth.client();
+  if (!sb) return;
+  sb.from('friend_calendar_plan_rsvps').upsert({
+    plan_id:plan.id, user_id:who, status:status, updated_at:new Date().toISOString()
+  }, { onConflict:'plan_id,user_id' }).then(function(r){
+    if (r.error) console.warn('[friend-calendar] rsvp save failed:', r.error.message);
+  });
+}
+function syncPlanDelete(planId){
+  if (!(window.AS && AS.auth)) return;
+  var sb = AS.auth.client();
+  if (!sb) return;
+  sb.from('friend_calendar_plans').delete().eq('id', planId).then(function(r){
+    if (r.error) console.warn('[friend-calendar] plan cancel failed:', r.error.message);
+  });
+}
+// Only a MANUALLY-added event is synced -- an auto-imported one (from
+// a pasted calendar feed URL, SOURCES below) stays local to whoever
+// subscribed to that feed, same as before this section. Syncing an
+// imported feed for real would mean the SUBSCRIPTION itself is shared,
+// a different, bigger feature than this.
+function loadEvents(sb, myId){
+  return Promise.all([
+    sb.from('friend_calendar_events').select('*'),
+    sb.from('friend_calendar_event_interest').select('*')
+  ]).then(function(res){
+    var interestByEvent = {};
+    (res[1].data || []).forEach(function(r){ (interestByEvent[r.event_id] = interestByEvent[r.event_id] || {})[r.user_id] = true; });
+    var synced = (res[0].data || []).map(function(row){ return eventFromRow(row, interestByEvent[row.id] || {}); });
+    var localOnly = EVENTS.filter(function(e){ return e.src; });   // auto-imported, never synced
+    EVENTS = synced.concat(localOnly);
+  });
+}
+function eventFromRow(row, interested){
+  return { id:row.id, title:row.title, date:row.date, start:row.start_hour, end:row.end_hour,
+    allDay:!!row.all_day, area:row.area || '', item:row.item || '', note:row.note || '',
+    url:row.url || '', by:row.by_user_id, visibleTo: row.visible_to == null ? 'all' : row.visible_to,
+    interested:interested, createdAt:row.created_at };
+}
+function syncEventCreate(ev){
+  if (!(window.AS && AS.auth)) return;
+  var sb = AS.auth.client();
+  if (!sb) return;
+  sb.from('friend_calendar_events').insert({
+    id:ev.id, by_user_id:ev.by, title:ev.title, date:ev.date, start_hour:ev.start, end_hour:ev.end,
+    all_day:!!ev.allDay, area:ev.area || '', item:ev.item || '', note:ev.note || '', url:ev.url || '',
+    visible_to: ev.visibleTo == null ? 'all' : ev.visibleTo
+  }).then(function(r){
+    if (r.error) console.warn('[friend-calendar] event save failed:', r.error.message);
+  });
+}
+function syncEventInterest(eventId, on){
+  if (!(window.AS && AS.auth)) return;
+  var sb = AS.auth.client();
+  if (!sb) return;
+  if (on) {
+    sb.from('friend_calendar_event_interest').upsert({ event_id:eventId, user_id:viewerId }, { onConflict:'event_id,user_id' })
+      .then(function(r){ if (r.error) console.warn('[friend-calendar] interest save failed:', r.error.message); });
+  } else {
+    sb.from('friend_calendar_event_interest').delete().eq('event_id', eventId).eq('user_id', viewerId)
+      .then(function(r){ if (r.error) console.warn('[friend-calendar] interest remove failed:', r.error.message); });
+  }
+}
+function loadAlertState(sb, myId){
+  return sb.from('friend_calendar_alert_state').select('*').eq('user_id', myId).maybeSingle()
+    .then(function(r){ if (r.data) alertsCursor = r.data.seen_until; });
 }
 // Local-first (every caller mutates the block object before calling
 // this), synced right after -- same pattern as syncMyProfile(). Not
@@ -3518,10 +3695,14 @@ function boot(){
     renderAll();
     handleAddFromLink();
   });
-  // A friend's message otherwise only shows up once you happen to open
-  // Messages again -- this keeps the badge count honest in the
-  // background too. Skips while a thread's own faster poll has it covered.
-  setInterval(function(){ if (!openThreadId) refreshThreads(); }, 30000);
+  // A friend's message, invite, RSVP reply, or new event otherwise only
+  // shows up once you happen to reopen the relevant sheet -- this keeps
+  // the calendar and badge counts honest in the background too. Skips
+  // the thread refresh while a thread's own faster poll has it covered.
+  setInterval(function(){
+    if (!openThreadId) refreshThreads();
+    refreshAlertsData().then(function(){ renderCalendar(); renderPlans(); });
+  }, 30000);
 }
 
 // ---- DEMO MODE (?demo=1) ------------------------------------------
