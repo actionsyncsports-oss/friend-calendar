@@ -1226,7 +1226,7 @@ function renderPlanForm(date, start, end, whoIds, openIds, place){
     // row -- it has to exist server-side first, so announcePlan() (which
     // creates that thread) waits for the plan sync instead of firing in
     // parallel with it.
-    syncPlanCreate(plan).then(function(){ announcePlan(plan); renderBadges(); });
+    syncPlanCreate(plan).then(function(){ announcePlan(plan); renderBadges(); }).catch(function(){});
   });
 }
 
@@ -3395,9 +3395,17 @@ function loadPeopleAndGroups(){
   viewerId = user.id;
   selectedIds = [user.id];
 
-  return sb.from('crew').select('member_id').eq('owner_id', user.id).eq('status', 'accepted')
+  // Crew is symmetric (whoever hit "Add" owns the row), but this only
+  // ever checked owner_id = me -- so a friend who added YOU (you're
+  // member_id on their row, not owner_id) never showed up here at all:
+  // not just their blocks, nothing about them, even though every RLS
+  // policy on this data (blocks, profiles, threads...) already treats
+  // the relationship as symmetric. Matches that now.
+  return sb.from('crew').select('owner_id,member_id').eq('status', 'accepted')
+    .or('owner_id.eq.' + user.id + ',member_id.eq.' + user.id)
     .then(function(cr){
-      var ids = (cr.data || []).map(function(r){ return r.member_id; });
+      var ids = (cr.data || []).map(function(r){ return r.owner_id === user.id ? r.member_id : r.owner_id; });
+      ids = ids.filter(function(id, i){ return ids.indexOf(id) === i; });   // a genuinely mutual pair (both directions) would otherwise double up
       if (!ids.length) return [];
       return sb.from('profiles').select('id,name,display_name,first_name,last_name,photo_url,location')
         .in('id', ids).then(function(pr){ return pr.data || []; });
@@ -3517,7 +3525,14 @@ function loadPlans(sb, myId){
   ]).then(function(res){
     var rsvpsByPlan = {};
     (res[1].data || []).forEach(function(r){ (rsvpsByPlan[r.plan_id] = rsvpsByPlan[r.plan_id] || {})[r.user_id] = r; });
-    PLANS = (res[0].data || []).map(function(row){ return planFromRow(row, rsvpsByPlan[row.id] || {}); });
+    var synced = (res[0].data || []).map(function(row){ return planFromRow(row, rsvpsByPlan[row.id] || {}); });
+    // A plan whose OWN save hasn't resolved yet shouldn't vanish just
+    // because this refresh's SELECT ran first and raced it -- keep it
+    // until its own sync settles (syncPlanCreate() adds it for real,
+    // or removes it itself with an error, once it does).
+    var syncedIds = synced.map(function(p){ return p.id; });
+    var stillSaving = PLANS.filter(function(p){ return p._syncing && syncedIds.indexOf(p.id) === -1; });
+    PLANS = synced.concat(stillSaving);
   });
 }
 function planFromRow(row, rsvpRowsByUser){
@@ -3532,22 +3547,39 @@ function planFromRow(row, rsvpRowsByUser){
 // Only the creator's own row is written here (RLS: plan_rsvps writes
 // are self-only, same as thread_state) -- everyone else shows as
 // 'invited' by default via invited_ids until THEY write their own row.
+// Was swallowing a failed plan insert as if it had succeeded (the
+// .then() callback returned normally either way), so announcePlan()
+// still ran -- a thread referencing a plan_id that was never actually
+// written, AND no sign anything had gone wrong until the next
+// loadPlans() refresh quietly dropped the plan with no explanation.
+// Now: a failed save removes the plan locally and says so; a genuine
+// failure disappearing is at least now an HONEST disappearance, not a
+// silent one, and loadPlans() (below) won't drop a plan that's still
+// mid-save, so a slow connection can't cause the same symptom either.
 function syncPlanCreate(plan){
   if (!(window.AS && AS.auth)) return Promise.resolve();
   var sb = AS.auth.client();
   if (!sb) return Promise.resolve();
+  plan._syncing = true;
   var invitedIds = Object.keys(plan.rsvps).filter(function(id){ return id !== plan.creatorId; });
   return sb.from('friend_calendar_plans').insert({
     id:plan.id, creator_id:plan.creatorId, date:plan.date, start_hour:plan.start, end_hour:plan.end,
     title:plan.title || null, item:plan.item || null, area:plan.area || '', spot:plan.spot || '',
     notes:plan.notes || '', invited_ids:invitedIds, visible_to: plan.visibleTo == null ? 'invited' : plan.visibleTo
   }).then(function(r){
-    if (r.error) { console.warn('[friend-calendar] plan create failed:', r.error.message); return; }
+    if (r.error) throw new Error(r.error.message);
     return sb.from('friend_calendar_plan_rsvps').upsert({
       plan_id:plan.id, user_id:plan.creatorId, status: plan.rsvps[plan.creatorId] || 'going'
     }, { onConflict:'plan_id,user_id' }).then(function(r2){
       if (r2.error) console.warn('[friend-calendar] creator rsvp save failed:', r2.error.message);
     });
+  }).then(function(res){ plan._syncing = false; return res; }, function(e){
+    plan._syncing = false;
+    console.warn('[friend-calendar] plan create failed:', e && e.message);
+    PLANS = PLANS.filter(function(x){ return x.id !== plan.id; });
+    showToast('Couldn’t save “' + plan.title + '” — check your connection and try again.');
+    renderCalendar(); renderPlans();
+    throw e;
   });
 }
 // Always your own row (RLS wouldn't allow anyone else's) -- used both
