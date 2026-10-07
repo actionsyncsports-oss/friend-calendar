@@ -581,7 +581,10 @@ function uncancelBlockDate(b, date){
 function consumeAvailability(personId, date, start, end){
   var p = personById(personId); if (!p) return;
   p.blocks.forEach(function(b){
-    if (blockApplies(b, date) && b.start < end && b.end > start) cancelBlockDate(b, date);
+    if (blockApplies(b, date) && b.start < end && b.end > start) {
+      cancelBlockDate(b, date);
+      if (personId === viewerId) syncBlockUpsert(b);   // crew's own blocks aren't synced from here -- RLS only allows writing your own, and that's correct: their own session is what should persist their own reaction
+    }
   });
 }
 // The inverse -- a plan being cancelled, or an RSVP backing off "going",
@@ -591,7 +594,10 @@ function consumeAvailability(personId, date, start, end){
 function restoreAvailability(personId, date, start, end){
   var p = personById(personId); if (!p) return;
   p.blocks.forEach(function(b){
-    if (isCancelledOn(b, date) && b.start < end && b.end > start) uncancelBlockDate(b, date);
+    if (isCancelledOn(b, date) && b.start < end && b.end > start) {
+      uncancelBlockDate(b, date);
+      if (personId === viewerId) syncBlockUpsert(b);
+    }
   });
 }
 // A block has a LEVEL ('free' = actually available, 'open' = around and up for something
@@ -1003,20 +1009,21 @@ function renderDaySheet(){
   card.querySelectorAll('[data-del]').forEach(function(b){
     b.addEventListener('click', function(){
       viewer.blocks = viewer.blocks.filter(function(x){ return x.id !== b.dataset.del; });
+      syncBlockDelete(b.dataset.del);
       renderDaySheet(); renderCalendar();
     });
   });
   card.querySelectorAll('[data-cancel-date]').forEach(function(b){
     b.addEventListener('click', function(){
       var blk = viewer.blocks.filter(function(x){ return x.id === b.dataset.cancelDate; })[0];
-      if (blk) cancelBlockDate(blk, date);
+      if (blk) { cancelBlockDate(blk, date); syncBlockUpsert(blk); }
       renderDaySheet(); renderCalendar();
     });
   });
   card.querySelectorAll('[data-uncancel-date]').forEach(function(b){
     b.addEventListener('click', function(){
       var blk = viewer.blocks.filter(function(x){ return x.id === b.dataset.uncancelDate; })[0];
-      if (blk) uncancelBlockDate(blk, date);
+      if (blk) { uncancelBlockDate(blk, date); syncBlockUpsert(blk); }
       renderDaySheet(); renderCalendar();
     });
   });
@@ -1093,7 +1100,7 @@ function renderFreeForm(date){
     var repeat = document.getElementById('blk-repeat').checked;
     var repeatWeeks = repeat ? document.getElementById('blk-repeat-weeks').value : '';
     days.forEach(function(d){
-      viewer.blocks.push({
+      var blk = {
         id:newId('blk'), date:d, start:s, end:e,
         repeat: repeat ? 'weekly' : 'none',
         repeatUntil: (repeat && repeatWeeks) ? addDaysStr(d, Number(repeatWeeks) * 7) : null,
@@ -1101,7 +1108,9 @@ function renderFreeForm(date){
         area: (!remote && where === '@other') ? areaTxt : '',
         travel: !remote && document.getElementById('blk-travel').checked,
         remote: remote
-      });
+      };
+      viewer.blocks.push(blk);
+      syncBlockUpsert(blk);
     });
     renderDaySheet(); renderCalendar();
   });
@@ -3262,8 +3271,55 @@ function loadPeopleAndGroups(){
         });
     })
     .catch(function(e){ console.warn('[friend-calendar] profile data load failed:', e && e.message); })
+    // Availability blocks were purely in-memory before this -- gone on
+    // every refresh. friend_calendar_blocks, same self+crew read as
+    // profiles, merged onto the PEOPLE entries' .blocks arrays.
+    .then(function(){
+      var ids = PEOPLE.map(function(p){ return p.id; });
+      return sb.from('friend_calendar_blocks').select('*').in('user_id', ids)
+        .then(function(br){
+          (br.data || []).forEach(function(row){
+            var p = personById(row.user_id);
+            if (p) p.blocks.push(blockFromRow(row));
+          });
+        });
+    })
+    .catch(function(e){ console.warn('[friend-calendar] blocks load failed:', e && e.message); })
     .then(function(){ return loadGroups(sb, user.id); })
     .catch(function(e){ console.warn('[friend-calendar] groups load failed:', e && e.message); });
+}
+function blockFromRow(row){
+  return { id:row.id, date:row.date, start:row.start_hour, end:row.end_hour,
+    repeat:row.repeat || 'none', repeatUntil:row.repeat_until || null,
+    level:row.level || 'free', visibleTo: row.visible_to == null ? 'all' : row.visible_to,
+    area:row.area || '', travel:!!row.travel, remote:!!row.remote,
+    cancelledDates: row.cancelled_dates || [] };
+}
+// Local-first (every caller mutates the block object before calling
+// this), synced right after -- same pattern as syncMyProfile(). Not
+// debounced: block writes happen one at a time on explicit actions
+// (add, remove, cancel a date), not rapid-fire like taste ratings.
+function syncBlockUpsert(b){
+  if (!(window.AS && AS.auth)) return;
+  var sb = AS.auth.client();
+  if (!sb) return;
+  sb.from('friend_calendar_blocks').upsert({
+    id:b.id, user_id:viewerId, date:b.date, start_hour:b.start, end_hour:b.end,
+    repeat:b.repeat || 'none', repeat_until:b.repeatUntil || null,
+    level:b.level || 'free', visible_to: b.visibleTo == null ? 'all' : b.visibleTo,
+    area:b.area || '', travel:!!b.travel, remote:!!b.remote,
+    cancelled_dates:b.cancelledDates || [], updated_at:new Date().toISOString()
+  }, { onConflict:'id' }).then(function(r){
+    if (r.error) console.warn('[friend-calendar] block save failed:', r.error.message);
+  });
+}
+function syncBlockDelete(id){
+  if (!(window.AS && AS.auth)) return;
+  var sb = AS.auth.client();
+  if (!sb) return;
+  sb.from('friend_calendar_blocks').delete().eq('id', id).then(function(r){
+    if (r.error) console.warn('[friend-calendar] block delete failed:', r.error.message);
+  });
 }
 
 // ---- Persisting profile edits -------------------------------------
