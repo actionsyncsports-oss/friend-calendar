@@ -665,25 +665,35 @@ function photoRowHtml(me){
 // actionsync-profile-Pv03.00.00.html's own uploadAvatarToServer()
 // already uses -- same account, same photo, so a photo set here shows
 // up in ActionSync too, not a parallel copy that can drift.
+// Resolves { url } on success or { error } on failure -- the generic
+// "upload failed" toast this used to produce on ANY failure gave no
+// way to tell a storage RLS rejection apart from a network error apart
+// from the profiles write failing, so there was nothing to go on when
+// someone reported it not sticking. Matches actionsync-profile's own
+// uploadAvatarToServer(), which already surfaces up.error.message the
+// same way.
 function uploadMyAvatar(dataUrl){
-  if (!(window.AS && AS.auth)) return Promise.resolve(null);
+  if (!(window.AS && AS.auth)) return Promise.resolve({ error:'Not signed in' });
   var sb = AS.auth.client();
-  if (!sb) return Promise.resolve(null);
+  if (!sb) return Promise.resolve({ error:'Not signed in' });
   return fetch(dataUrl).then(function(r){ return r.blob(); }).then(function(blob){
     var path = viewerId + '/avatar.jpg';
     return sb.storage.from('avatars').upload(path, blob, { contentType:'image/jpeg', upsert:true })
       .then(function(up){
-        if (up.error) { console.warn('[friend-calendar] avatar upload failed:', up.error.message); return null; }
+        if (up.error) { console.warn('[friend-calendar] avatar upload failed:', up.error.message); return { error:up.error.message }; }
         var pub = sb.storage.from('avatars').getPublicUrl(path);
         var url = pub && pub.data && pub.data.publicUrl;
-        if (!url) return null;
+        if (!url) return { error:'No public URL returned' };
         url += '?v=' + Date.now();   // path never changes, so bust any cached copy
-        return sb.from('profiles').update({ photo_url:url }).eq('id', viewerId).then(function(res){
-          if (res.error) { console.warn('[friend-calendar] photo_url save failed:', res.error.message); return null; }
-          return url;
+        // upsert, not update: if this account somehow has no profiles
+        // row yet, update() would silently affect zero rows and report
+        // success anyway.
+        return sb.from('profiles').upsert({ id:viewerId, photo_url:url }, { onConflict:'id' }).then(function(res){
+          if (res.error) { console.warn('[friend-calendar] photo_url save failed:', res.error.message); return { error:res.error.message }; }
+          return { url:url };
         });
       });
-  }).catch(function(e){ console.warn('[friend-calendar] avatar upload failed:', e && e.message); return null; });
+  }).catch(function(e){ console.warn('[friend-calendar] avatar upload failed:', e && e.message); return { error:(e && e.message) || 'Unknown error' }; });
 }
 function bindPhotoRow(card, redraw){
   var pick = card.querySelector('#photo-pick'), file = card.querySelector('#photo-file');
@@ -693,9 +703,9 @@ function bindPhotoRow(card, redraw){
     photoFromFile(file.files[0], function(url, err){
       if (err) { card.querySelector('#photo-err').textContent = err; return; }
       setPhoto(viewerId, url); redraw(); renderAll();         // local-first: instant feedback
-      uploadMyAvatar(url).then(function(realUrl){
-        if (realUrl) { setPhoto(viewerId, realUrl); if (document.getElementById('sheet-card').contains(card)) { redraw(); renderAll(); } }
-        else showToast('Photo saved on this device — upload to the server failed');
+      uploadMyAvatar(url).then(function(res){
+        if (res.url) { setPhoto(viewerId, res.url); if (document.getElementById('sheet-card').contains(card)) { redraw(); renderAll(); } }
+        else showToast('Photo saved on this device — upload failed: ' + (res.error || 'unknown error'));
       });
     });
   });
