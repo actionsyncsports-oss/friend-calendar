@@ -228,11 +228,41 @@
 </head>
 <body>
 
-<div id="auth-gate" style="display:none;position:fixed;inset:0;background:var(--paper);z-index:100;overflow-y:auto;padding:48px 20px;">
-  <div style="max-width:360px;margin:0 auto;">
-    <h2 style="font:400 26px var(--serif);margin:0 0 4px;">Friend Calendar</h2>
-    <div style="color:var(--soft);font-size:13px;margin-bottom:20px;">Sign in with your ActionSync account &mdash; your crew and groups come from there.</div>
+<div id="auth-gate" style="display:none;position:fixed;inset:0;background:var(--paper);z-index:100;overflow-y:auto;padding:0 0 48px;">
+  <div style="text-align:center;padding:26px 20px 4px;">
+    <img src="actionsync-logo-light.png" alt="ActionSync" style="height:26px;width:auto;" onerror="this.style.display='none'"/>
+  </div>
+  <div style="max-width:380px;margin:0 auto;padding:0 20px;">
+    <h1 style="text-align:center;font:400 38px var(--serif);margin:14px 0 6px;letter-spacing:-0.01em;">
+      <span style="color:#4fb8e8">Friend</span> <span style="color:#e2862a">Calendar</span>
+    </h1>
+    <div style="text-align:center;color:var(--soft);font-size:14px;line-height:1.5;margin:0 0 22px;">
+      See when your friends are actually free, all on one calendar &mdash; so planning something together takes a glance, not a group chat.
+    </div>
     <div id="auth-gate-body"></div>
+  </div>
+  <div style="max-width:420px;margin:34px auto 0;padding:0 20px;">
+    <div style="font-size:12px;color:var(--soft);text-align:center;margin-bottom:8px;letter-spacing:0.02em;">a day, at a glance</div>
+    <svg viewBox="0 0 420 190" style="width:100%;height:auto;display:block;" role="img" aria-label="A sample day showing three friends' free time overlapping in the evening">
+      <rect x="0" y="0" width="420" height="190" rx="14" fill="var(--card)" stroke="var(--rule)"/>
+      <text x="20" y="28" font-family="Karla,sans-serif" font-size="11" fill="var(--soft)">6am</text>
+      <text x="138" y="28" font-family="Karla,sans-serif" font-size="11" fill="var(--soft)">12pm</text>
+      <text x="258" y="28" font-family="Karla,sans-serif" font-size="11" fill="var(--soft)">6pm</text>
+      <text x="390" y="28" font-family="Karla,sans-serif" font-size="11" fill="var(--soft)">12am</text>
+      <rect x="258" y="40" width="70" height="128" fill="var(--larch-bg)"/>
+      <circle cx="30" cy="68" r="12" fill="#1c5fae"/><text x="30" y="72" text-anchor="middle" font-family="Karla,sans-serif" font-weight="700" font-size="11" fill="#fff">A</text>
+      <rect x="48" y="60" width="330" height="16" rx="8" fill="#eceeea"/>
+      <rect x="150" y="60" width="228" height="16" rx="8" fill="#1c5fae"/>
+      <circle cx="30" cy="100" r="12" fill="#1f7a3d"/><text x="30" y="104" text-anchor="middle" font-family="Karla,sans-serif" font-weight="700" font-size="11" fill="#fff">J</text>
+      <rect x="48" y="92" width="330" height="16" rx="8" fill="#eceeea"/>
+      <rect x="110" y="92" width="200" height="16" rx="8" fill="#1f7a3d"/>
+      <circle cx="30" cy="132" r="12" fill="#a15c00"/><text x="30" y="136" text-anchor="middle" font-family="Karla,sans-serif" font-weight="700" font-size="11" fill="#fff">S</text>
+      <rect x="48" y="124" width="330" height="16" rx="8" fill="#eceeea"/>
+      <rect x="192" y="124" width="186" height="16" rx="8" fill="#a15c00"/>
+      <line x1="258" y1="40" x2="258" y2="168" stroke="var(--larch)" stroke-width="1.5" stroke-dasharray="3,3"/>
+      <line x1="328" y1="40" x2="328" y2="168" stroke="var(--larch)" stroke-width="1.5" stroke-dasharray="3,3"/>
+      <text x="293" y="182" text-anchor="middle" font-family="Karla,sans-serif" font-weight="700" font-size="11" fill="var(--ink)">everyone&#8217;s free, 6&ndash;8pm</text>
+    </svg>
   </div>
 </div>
 
