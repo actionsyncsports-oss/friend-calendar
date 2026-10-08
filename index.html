@@ -223,6 +223,8 @@
   #toast{position:fixed;left:50%;bottom:64px;transform:translateX(-50%);background:var(--ink);color:var(--paper);
     font-size:13px;font-weight:700;padding:9px 16px;border-radius:20px;z-index:9999;max-width:88vw;text-align:center;
     opacity:0;pointer-events:none;transition:opacity 0.2s;}
+  .ta-opt:hover{background:var(--accent-bg)}
+  .ta-opt:last-child{border-bottom:none !important}
   @media (max-width:520px){ .day{min-height:60px;padding:5px 3px 3px} #monthlabel{font-size:22px} .day .tag{right:3px;font-size:10px} }
 </style>
 </head>
@@ -465,16 +467,104 @@ function ownerWindowForViewer(dateStr, start, end, ownerId, viewer){
   var e = convertDateTimeToZone(dateStr, end, fromTz, toTz);
   return { date:s.date, start:s.hour, end: e.date === s.date ? e.hour : 24 };
 }
-// Common zones for the datalist in My profile -- free text otherwise
-// accepts any IANA name, this is just what's offered up front.
-var COMMON_TIMEZONES = [
-  'Pacific/Honolulu', 'America/Anchorage', 'America/Los_Angeles', 'America/Vancouver', 'America/Phoenix',
-  'America/Denver', 'America/Edmonton', 'America/Chicago', 'America/Winnipeg', 'America/Mexico_City',
-  'America/New_York', 'America/Toronto', 'America/Halifax', 'America/St_Johns', 'America/Sao_Paulo',
-  'UTC', 'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Madrid', 'Europe/Athens', 'Europe/Moscow',
-  'Africa/Johannesburg', 'Asia/Dubai', 'Asia/Kolkata', 'Asia/Bangkok', 'Asia/Shanghai', 'Asia/Tokyo',
-  'Asia/Seoul', 'Australia/Perth', 'Australia/Sydney', 'Pacific/Auckland'
-];
+// The REAL, complete IANA zone list -- every modern browser ships this
+// (it's the same database tzOffsetMinutesAt() already reads from), so
+// there's no need to hand-maintain a list and risk someone picking a
+// name that isn't actually valid. Falls back to a short curated list
+// only on a browser old enough to lack Intl.supportedValuesOf.
+var ALL_TIMEZONES = (function(){
+  try { if (typeof Intl.supportedValuesOf === 'function') return Intl.supportedValuesOf('timeZone'); } catch (e) {}
+  return [
+    'Pacific/Honolulu', 'America/Anchorage', 'America/Los_Angeles', 'America/Vancouver', 'America/Phoenix',
+    'America/Denver', 'America/Edmonton', 'America/Chicago', 'America/Winnipeg', 'America/Mexico_City',
+    'America/New_York', 'America/Toronto', 'America/Halifax', 'America/St_Johns', 'America/Sao_Paulo',
+    'UTC', 'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Madrid', 'Europe/Athens', 'Europe/Moscow',
+    'Africa/Johannesburg', 'Asia/Dubai', 'Asia/Kolkata', 'Asia/Bangkok', 'Asia/Shanghai', 'Asia/Tokyo',
+    'Asia/Seoul', 'Australia/Perth', 'Australia/Sydney', 'Pacific/Auckland'
+  ];
+})();
+
+/* ---------------- TYPE-TO-PICK DROPDOWNS (area, time zone) ---------------- */
+// One small widget, two real data sources: time zone filters the
+// browser's own IANA list (no network needed); area geocodes against
+// OpenStreetMap's Nominatim, same free public service already used
+// for finding nearby spots -- same fair-use caveat applies (fine for
+// a few keystrokes per person, not for a high-traffic app; see the
+// OSM section's own comment further down).
+// fetchOptions(query) -> array of strings, or a Promise of one.
+function bindTypeAhead(inputId, boxId, fetchOptions, onPick){
+  var input = document.getElementById(inputId), box = document.getElementById(boxId);
+  if (!input || !box) return;
+  var timer = null, seq = 0;
+  function render(options){
+    if (!options.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
+    box.innerHTML = options.map(function(o, i){ return '<div class="ta-opt" data-i="' + i + '" style="padding:7px 10px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--rule)">' + esc(o) + '</div>'; }).join('');
+    box.style.display = 'block';
+    box.querySelectorAll('.ta-opt').forEach(function(el){
+      // mousedown, not click: fires before the input's blur closes the box
+      el.addEventListener('mousedown', function(e){ e.preventDefault(); onPick(options[Number(el.dataset.i)]); box.style.display = 'none'; });
+    });
+  }
+  input.addEventListener('input', function(){
+    clearTimeout(timer);
+    var q = input.value.trim();
+    if (!q) { box.style.display = 'none'; return; }
+    var mySeq = ++seq;
+    timer = setTimeout(function(){
+      Promise.resolve(fetchOptions(q)).then(function(options){ if (mySeq === seq) render(options || []); });
+    }, 350);
+  });
+  input.addEventListener('focus', function(){ if (input.value.trim() && box.innerHTML) box.style.display = 'block'; });
+  input.addEventListener('blur', function(){ setTimeout(function(){ box.style.display = 'none'; }, 150); });
+}
+function timezoneOptions(q){
+  var ql = q.toLowerCase();
+  return ALL_TIMEZONES.filter(function(z){ return z.toLowerCase().indexOf(ql) !== -1; }).slice(0, 8);
+}
+// US state / Canadian province names -> the abbreviation this app's
+// own area strings already use elsewhere ("Rossland, BC") -- applied
+// when Nominatim's result is in one of those two countries; left as
+// the full region name otherwise rather than guessing at a convention
+// this app doesn't have for the rest of the world.
+var REGION_ABBR = {
+  'british columbia':'BC','alberta':'AB','saskatchewan':'SK','manitoba':'MB','ontario':'ON','quebec':'QC',
+  'new brunswick':'NB','nova scotia':'NS','prince edward island':'PE','newfoundland and labrador':'NL',
+  'yukon':'YT','northwest territories':'NT','nunavut':'NU',
+  'alabama':'AL','alaska':'AK','arizona':'AZ','arkansas':'AR','california':'CA','colorado':'CO','connecticut':'CT',
+  'delaware':'DE','florida':'FL','georgia':'GA','hawaii':'HI','idaho':'ID','illinois':'IL','indiana':'IN','iowa':'IA',
+  'kansas':'KS','kentucky':'KY','louisiana':'LA','maine':'ME','maryland':'MD','massachusetts':'MA','michigan':'MI',
+  'minnesota':'MN','mississippi':'MS','missouri':'MO','montana':'MT','nebraska':'NE','nevada':'NV','new hampshire':'NH',
+  'new jersey':'NJ','new mexico':'NM','new york':'NY','north carolina':'NC','north dakota':'ND','ohio':'OH',
+  'oklahoma':'OK','oregon':'OR','pennsylvania':'PA','rhode island':'RI','south carolina':'SC','south dakota':'SD',
+  'tennessee':'TN','texas':'TX','utah':'UT','vermont':'VT','virginia':'VA','washington':'WA','west virginia':'WV',
+  'wisconsin':'WI','wyoming':'WY'
+};
+function areaLabelFromNominatim(row){
+  var a = row.address || {};
+  var place = a.city || a.town || a.village || a.hamlet || a.municipality || a.county || row.name;
+  if (!place) return null;
+  var region = a.state || a.province || '';
+  var abbr = REGION_ABBR[region.toLowerCase()] || region;
+  var bits = [place];
+  if (abbr) bits.push(abbr);
+  else if (a.country) bits.push(a.country);
+  return bits.join(', ');
+}
+var _areaSearchCache = {};
+function areaOptions(q){
+  if (q.length < 2) return [];
+  if (_areaSearchCache[q]) return Promise.resolve(_areaSearchCache[q]);
+  return osmFetch('https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=6&q=' + encodeURIComponent(q))
+    .then(function(rows){
+      var seen = {}, out = [];
+      (rows || []).forEach(function(row){
+        var label = areaLabelFromNominatim(row);
+        if (label && !seen[label]) { seen[label] = 1; out.push(label); }
+      });
+      _areaSearchCache[q] = out;
+      return out;
+    }).catch(function(){ return []; });
+}
 
 /* ---------------- DATA ---------------- */
 // An availability BLOCK says "I'm free from `start` to `end` on `date`",
@@ -3373,10 +3463,12 @@ function renderProfileInner(){
 function renderAreaTab(card, me, tabs){
   card.innerHTML = '<h4>My profile</h4>'
     + '<div style="margin-bottom:8px">' + tabs + '</div>'
-    + '<div class="field"><label>Where you are (town or neighbourhood)</label><input type="text" id="area-me" maxlength="60" value="' + esc(me.area || '') + '" placeholder="e.g. Rossland, BC"/></div>'
+    + '<div class="field" style="position:relative"><label>Where you are (town or neighbourhood)</label><input type="text" id="area-me" maxlength="80" autocomplete="off" value="' + esc(me.area || '') + '" placeholder="Start typing a town…"/>'
+      + '<div id="area-me-box" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:5;background:var(--card);border:1.5px solid var(--rule);border-radius:8px;max-height:220px;overflow-y:auto;box-shadow:0 4px 14px rgba(0,0,0,0.12)"></div></div>'
+    + '<div style="font-size:11px;color:var(--soft);margin:-4px 0 8px">Real places, from OpenStreetMap &mdash; pick one from the list as you type.</div>'
     + '<label class="check"><input type="checkbox" id="area-share"' + (me.shareArea !== false ? ' checked' : '') + '/> Friends can see my area</label>'
-    + '<div class="field"><label>Your time zone</label><input type="text" id="area-tz" maxlength="60" list="tz-list" autocomplete="off" value="' + esc(me.timezone || myTimezoneGuess()) + '"/>'
-      + '<datalist id="tz-list">' + COMMON_TIMEZONES.map(function(z){ return '<option value="' + esc(z) + '"></option>'; }).join('') + '</datalist></div>'
+    + '<div class="field" style="position:relative"><label>Your time zone</label><input type="text" id="area-tz" maxlength="60" autocomplete="off" value="' + esc(me.timezone || myTimezoneGuess()) + '"/>'
+      + '<div id="area-tz-box" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:5;background:var(--card);border:1.5px solid var(--rule);border-radius:8px;max-height:220px;overflow-y:auto;box-shadow:0 4px 14px rgba(0,0,0,0.12)"></div></div>'
     + '<div style="font-size:12px;color:var(--soft);margin:-4px 0 8px">Set automatically from this device. Change it if you’re usually somewhere else, so friends in other zones see your free time at the right time for them.</div>'
     + '<div class="sec">Trips and travel</div>'
     + '<div style="font-size:13px;color:var(--soft);margin-bottom:6px">Away for a few days? Free time you offer on those dates is in that town, so friends there can see you’re around and friends at home know you’re not.</div>'
@@ -3389,6 +3481,8 @@ function renderAreaTab(card, me, tabs){
     + '<div class="form-error" id="trip-error"></div><button class="btn small" id="trip-add">Add trip</button>'
     + '<div style="font-size:13px;color:var(--soft);margin:6px 0">It sets where local suggestions search by default. A town name only, never an address. If you keep it private, friends can’t pick it as a search area.</div>'
     + '<button class="btn" id="taste-done" style="width:100%;margin-top:12px">Done</button>';
+  bindTypeAhead('area-me', 'area-me-box', areaOptions, function(label){ document.getElementById('area-me').value = label; });
+  bindTypeAhead('area-tz', 'area-tz-box', timezoneOptions, function(z){ document.getElementById('area-tz').value = z; });
   card.querySelectorAll('[data-pcat]').forEach(function(b){ b.addEventListener('click', function(){ commitArea(); profileCat = b.dataset.pcat; profileQuery = ''; renderProfile(); }); });
   card.querySelectorAll('[data-trip-del]').forEach(function(b){ b.addEventListener('click', function(){ commitArea(); me.trips = tripsOf(me.id).filter(function(t){ return t.id !== b.dataset.tripDel; }); renderProfile(); }); });
   document.getElementById('trip-add').addEventListener('click', function(){
