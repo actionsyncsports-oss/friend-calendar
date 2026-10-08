@@ -1659,7 +1659,7 @@ function renderAddFriend(){
         if (!(window.AS && AS.auth)) return;
         var sb = AS.auth.client();
         if (!sb) return;
-        sb.from('profiles').select('id,name,display_name,first_name,last_name,photo_url')
+        sb.from('profiles').select('id,name,display_name,first_name,last_name,username,photo_url')
           .eq('profile_vis', 'public').ilike('display_name', '%' + q + '%').limit(10)
           .then(function(r){
             var rows = (r.data || []).filter(function(row){ return row.id !== viewerId; });
@@ -3588,7 +3588,8 @@ function renderAuthGate(){
 
 function nameOfProfile(row){
   return (row && (row.display_name || row.name
-    || [row.first_name, row.last_name].filter(Boolean).join(' '))) || 'Someone';
+    || [row.first_name, row.last_name].filter(Boolean).join(' ')
+    || row.username)) || 'Someone';   // last resort before "Someone" -- still more identifying than nothing, for someone who's only ever set a handle
 }
 
 // Real groups: owned crew_groups, plus ones you belong to but didn't
@@ -3651,7 +3652,7 @@ function loadPeopleAndGroups(){
       var ids = (cr.data || []).map(function(r){ return r.owner_id === user.id ? r.member_id : r.owner_id; });
       ids = ids.filter(function(id, i){ return ids.indexOf(id) === i; });   // a genuinely mutual pair (both directions) would otherwise double up
       if (!ids.length) return [];
-      return sb.from('profiles').select('id,name,display_name,first_name,last_name,photo_url,location')
+      return sb.from('profiles').select('id,name,display_name,first_name,last_name,username,photo_url,location')
         .in('id', ids).then(function(pr){ return pr.data || []; });
     })
     .then(function(crewRows){
