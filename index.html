@@ -665,13 +665,20 @@ function photoRowHtml(me){
 // actionsync-profile-Pv03.00.00.html's own uploadAvatarToServer()
 // already uses -- same account, same photo, so a photo set here shows
 // up in ActionSync too, not a parallel copy that can drift.
-// Resolves { url } on success or { error } on failure -- the generic
-// "upload failed" toast this used to produce on ANY failure gave no
-// way to tell a storage RLS rejection apart from a network error apart
-// from the profiles write failing, so there was nothing to go on when
-// someone reported it not sticking. Matches actionsync-profile's own
-// uploadAvatarToServer(), which already surfaces up.error.message the
-// same way.
+// Resolves { url } on success or { error } on failure. Error messages
+// are prefixed by which step failed (storage vs. the profiles write) --
+// the previous version's single generic message made the two
+// indistinguishable, which mattered here: switching the profiles write
+// to upsert() produced "new row violates row-level security policy"
+// where update() hadn't, because Postgres evaluates an INSERT policy's
+// WITH CHECK on ANY upsert attempt -- even one that only ever reaches
+// the UPDATE branch, against a row that already exists -- and
+// profiles_write_own (the insert policy) is stricter than
+// profiles_update_own in ways an ordinary signed-in update never hits.
+// Back to update(): a profiles row missing entirely would mean an
+// orphaned session, which actionsync-auth.js already signs out before
+// this code can even run, so upsert's "no row yet" safety net was
+// defending against a case that can't reach here anyway.
 function uploadMyAvatar(dataUrl){
   if (!(window.AS && AS.auth)) return Promise.resolve({ error:'Not signed in' });
   var sb = AS.auth.client();
@@ -680,16 +687,13 @@ function uploadMyAvatar(dataUrl){
     var path = viewerId + '/avatar.jpg';
     return sb.storage.from('avatars').upload(path, blob, { contentType:'image/jpeg', upsert:true })
       .then(function(up){
-        if (up.error) { console.warn('[friend-calendar] avatar upload failed:', up.error.message); return { error:up.error.message }; }
+        if (up.error) { console.warn('[friend-calendar] avatar upload failed:', up.error.message); return { error:'storage: ' + up.error.message }; }
         var pub = sb.storage.from('avatars').getPublicUrl(path);
         var url = pub && pub.data && pub.data.publicUrl;
-        if (!url) return { error:'No public URL returned' };
+        if (!url) return { error:'storage: no public URL returned' };
         url += '?v=' + Date.now();   // path never changes, so bust any cached copy
-        // upsert, not update: if this account somehow has no profiles
-        // row yet, update() would silently affect zero rows and report
-        // success anyway.
-        return sb.from('profiles').upsert({ id:viewerId, photo_url:url }, { onConflict:'id' }).then(function(res){
-          if (res.error) { console.warn('[friend-calendar] photo_url save failed:', res.error.message); return { error:res.error.message }; }
+        return sb.from('profiles').update({ photo_url:url }).eq('id', viewerId).then(function(res){
+          if (res.error) { console.warn('[friend-calendar] photo_url save failed:', res.error.message); return { error:'profile: ' + res.error.message }; }
           return { url:url };
         });
       });
