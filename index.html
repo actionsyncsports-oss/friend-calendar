@@ -1217,6 +1217,7 @@ function renderDaySheet(){
   var winH = an.best.size >= 2 ? an.best.end - an.best.start : 0;
   if (an.best.size >= 2) html += ideasHtml(an.best.who, winH);
   html += eventsDayHtml(date, ids);
+  html += ascalDayHtml(date);
 
   // --- everyone's free time as lanes ---
   var span = HMAX - HMIN;
@@ -2520,6 +2521,53 @@ function eventsDayHtml(date, ids){
       + (ev.by === viewerId && !ev.src ? '<button class="btn small ghost" data-ev-edit="' + ev.id + '">Edit</button>' : '')
       + (u ? ' <a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">Details</a>' : '') + '</div></div>';
   });
+  return h;
+}
+/* ---------------- ACTIONSYNC MEETUPS + EXPEDITIONS (read-only) ----------------
+ * Step one of pulling this together with the main ActionSync app's own
+ * calendar -- meetups (public.events) and expeditions, the "create or
+ * join a paddling/biking trip" feature (public.trips), same shared
+ * Supabase project, no new tables. Deliberately read-only and kept in
+ * its own ASCAL namespace, not merged into PLANS/EVENTS -- joining an
+ * expedition or RSVPing to a meetup still happens in ActionSync itself
+ * for now; this is "see it here too," not "manage it here."
+ * ---------------------------------------------------------------- */
+var ASCAL = { meetups:[], expeditions:[], names:{} };
+function loadActionSyncCalendar(sb){
+  var from = TODAY, until = addDaysStr(TODAY, 60);
+  return Promise.all([
+    sb.from('events').select('id,host_id,type,title,event_date,event_time,location,sport,privacy')
+      .gte('event_date', from).lte('event_date', until).order('event_date', { ascending:true }),
+    sb.from('trips').select('id,organiser_id,title,sport,place_name,start_date,end_date,status,privacy')
+      .neq('status', 'cancelled').gte('end_date', from).lte('start_date', until).order('start_date', { ascending:true })
+  ]).then(function(res){
+    ASCAL.meetups = res[0].data || [];
+    ASCAL.expeditions = res[1].data || [];
+    var need = {};
+    ASCAL.meetups.forEach(function(e){ if (e.host_id && !personById(e.host_id) && !ASCAL.names[e.host_id]) need[e.host_id] = 1; });
+    ASCAL.expeditions.forEach(function(t){ if (t.organiser_id && !personById(t.organiser_id) && !ASCAL.names[t.organiser_id]) need[t.organiser_id] = 1; });
+    var ids = Object.keys(need);
+    if (!ids.length) return;
+    return sb.from('profiles').select('id,name,display_name,first_name,last_name,username').in('id', ids)
+      .then(function(pr){ (pr.data || []).forEach(function(row){ ASCAL.names[row.id] = nameOfProfile(row); }); });
+  }).catch(function(e){ console.warn('[friend-calendar] ActionSync calendar load failed:', e && e.message); });
+}
+function ascalHostName(id){ var p = personById(id); return (p && p.name) || ASCAL.names[id] || 'Someone on ActionSync'; }
+function ascalDayHtml(date){
+  var meetups = ASCAL.meetups.filter(function(e){ return e.event_date === date; });
+  var trips = ASCAL.expeditions.filter(function(t){ return t.start_date <= date && t.end_date >= date; });
+  if (!meetups.length && !trips.length) return '';
+  var h = '<div class="sec" style="margin-top:6px">Also on ActionSync</div>';
+  meetups.forEach(function(e){
+    h += '<div class="evrow"><div class="et">' + esc(e.title) + '</div><div class="em">' + esc(e.event_time || '')
+      + (e.location ? ', ' + esc(e.location) : '') + '. Hosted by ' + esc(ascalHostName(e.host_id)) + '</div></div>';
+  });
+  trips.forEach(function(t){
+    h += '<div class="evrow"><div class="et">' + esc(t.title) + (t.sport ? ' <span style="color:var(--soft);font-weight:400;font-size:12px">(' + esc(t.sport) + ')</span>' : '') + '</div>'
+      + '<div class="em">' + longDate(t.start_date) + (t.end_date !== t.start_date ? ' – ' + longDate(t.end_date) : '')
+      + (t.place_name ? ', ' + esc(t.place_name) : '') + '. Organised by ' + esc(ascalHostName(t.organiser_id)) + '</div></div>';
+  });
+  h += '<div style="font-size:12px;color:var(--soft);margin-top:4px">From the main ActionSync app — open it there to RSVP or apply.</div>';
   return h;
 }
 function bindDaySheetLocal(date){
@@ -3869,7 +3917,9 @@ function loadPeopleAndGroups(){
     // one created here rather than leaving it permanently missing.
     .then(function(){ return loadThreads(sb, user.id); })
     .then(function(){ GROUPS.forEach(ensureGroupThread); })
-    .catch(function(e){ console.warn('[friend-calendar] threads load failed:', e && e.message); });
+    .catch(function(e){ console.warn('[friend-calendar] threads load failed:', e && e.message); })
+    .then(function(){ return loadActionSyncCalendar(sb); })
+    .catch(function(e){ console.warn('[friend-calendar] ActionSync calendar load failed:', e && e.message); });
 }
 function blockFromRow(row){
   return { id:row.id, date:row.date, start:row.start_hour, end:row.end_hour,
@@ -4165,10 +4215,23 @@ function boot(){
   // shows up once you happen to reopen the relevant sheet -- this keeps
   // the calendar and badge counts honest in the background too. Skips
   // the thread refresh while a thread's own faster poll has it covered.
+  var _ascalTick = 0;
   setInterval(function(){
     if (!openThreadId) refreshThreads();
     refreshAlertsData().then(function(){ renderCalendar(); renderPlans(); });
+    // Meetups/expeditions change far less often than messages/plans --
+    // every 10th tick (~5 min) instead of every 30s.
+    if (++_ascalTick % 10 === 0) {
+      var sb = AS.auth.client();
+      if (sb) loadActionSyncCalendar(sb).then(renderDaySheetIfOpen);
+    }
   }, 30000);
+}
+// renderDaySheet() needs openDate set and the sheet actually open --
+// calling it blind from a background tick would render into a closed
+// sheet's detached DOM for no reason.
+function renderDaySheetIfOpen(){
+  if (openDate && document.getElementById('sheet-bg').classList.contains('on')) renderDaySheet();
 }
 
 // ---- DEMO MODE (?demo=1) ------------------------------------------
@@ -4226,6 +4289,13 @@ function seedDemoData(){
                     level:'free', visibleTo:'all', area:'Rossland, BC', travel:false, remote:false, cancelledDates:[] });
   personById('demo-jess').blocks.push({ id:'demo-jb2', date:addDaysStr(TODAY, 3), start:10, end:13, repeat:'none',
                     level:'free', visibleTo:'all', area:'Rossland, BC', travel:false, cancelledDates:[] });
+  // Read-only, from the main ActionSync app -- open today or day+2 to see these.
+  ASCAL.meetups = [
+    { id:'demo-ev1', host_id:'demo-sam', title:'Pickup soccer', event_date:TODAY, event_time:'6:30pm', location:'Gyro Park', sport:'soccer' }
+  ];
+  ASCAL.expeditions = [
+    { id:'demo-tr1', organiser_id:'demo-jess', title:'Weekend paddling trip', sport:'paddling', place_name:'Slocan Lake', start_date:addDaysStr(TODAY, 2), end_date:addDaysStr(TODAY, 4) }
+  ];
 
   document.getElementById('auth-gate').style.display = 'none';
   renderAll();
