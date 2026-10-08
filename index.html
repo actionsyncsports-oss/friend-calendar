@@ -2552,7 +2552,11 @@ function loadActionSyncCalendar(sb){
       .then(function(pr){ (pr.data || []).forEach(function(row){ ASCAL.names[row.id] = nameOfProfile(row); }); });
   }).catch(function(e){ console.warn('[friend-calendar] ActionSync calendar load failed:', e && e.message); });
 }
-function ascalHostName(id){ var p = personById(id); return (p && p.name) || ASCAL.names[id] || 'Someone on ActionSync'; }
+function ascalHostName(id){
+  if (id === viewerId) return 'you';   // never worth a name lookup for your own meetup/trip
+  var p = personById(id);
+  return (p && p.name) || ASCAL.names[id] || 'Someone on ActionSync';
+}
 function ascalDayHtml(date){
   var meetups = ASCAL.meetups.filter(function(e){ return e.event_date === date; });
   var trips = ASCAL.expeditions.filter(function(t){ return t.start_date <= date && t.end_date >= date; });
@@ -4291,7 +4295,8 @@ function seedDemoData(){
                     level:'free', visibleTo:'all', area:'Rossland, BC', travel:false, cancelledDates:[] });
   // Read-only, from the main ActionSync app -- open today or day+2 to see these.
   ASCAL.meetups = [
-    { id:'demo-ev1', host_id:'demo-sam', title:'Pickup soccer', event_date:TODAY, event_time:'6:30pm', location:'Gyro Park', sport:'soccer' }
+    { id:'demo-ev1', host_id:'demo-sam', title:'Pickup soccer', event_date:TODAY, event_time:'6:30pm', location:'Gyro Park', sport:'soccer' },
+    { id:'demo-ev2', host_id:'demo-me', title:'Morning trail run', event_date:TODAY, event_time:'7am', location:'Centennial Trail', sport:'running' }
   ];
   ASCAL.expeditions = [
     { id:'demo-tr1', organiser_id:'demo-jess', title:'Weekend paddling trip', sport:'paddling', place_name:'Slocan Lake', start_date:addDaysStr(TODAY, 2), end_date:addDaysStr(TODAY, 4) }
