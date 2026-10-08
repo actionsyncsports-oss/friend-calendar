@@ -2564,7 +2564,9 @@ function ascalDayHtml(date){
   var h = '<div class="sec" style="margin-top:6px">Also on ActionSync</div>';
   meetups.forEach(function(e){
     h += '<div class="evrow"><div class="et">' + esc(e.title) + '</div><div class="em">' + esc(e.event_time || '')
-      + (e.location ? ', ' + esc(e.location) : '') + '. Hosted by ' + esc(ascalHostName(e.host_id)) + '</div></div>';
+      + (e.location ? ', ' + esc(e.location) : '') + '. Hosted by ' + esc(ascalHostName(e.host_id)) + '</div>'
+      // TEMP debug line -- remove once the host-name mismatch is diagnosed.
+      + '<div class="em" style="color:#c2185b;font-size:10px">DEBUG host_id=' + esc(e.host_id) + ' viewerId=' + esc(viewerId) + '</div></div>';
   });
   trips.forEach(function(t){
     h += '<div class="evrow"><div class="et">' + esc(t.title) + (t.sport ? ' <span style="color:var(--soft);font-weight:400;font-size:12px">(' + esc(t.sport) + ')</span>' : '') + '</div>'
