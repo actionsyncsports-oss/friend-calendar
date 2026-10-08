@@ -3764,14 +3764,29 @@ function loadPeopleAndGroups(){
   viewerId = user.id;
   selectedIds = [user.id];
 
-  // Crew is symmetric (whoever hit "Add" owns the row), but this only
-  // ever checked owner_id = me -- so a friend who added YOU (you're
-  // member_id on their row, not owner_id) never showed up here at all:
-  // not just their blocks, nothing about them, even though every RLS
-  // policy on this data (blocks, profiles, threads...) already treats
-  // the relationship as symmetric. Matches that now.
-  return sb.from('crew').select('owner_id,member_id').eq('status', 'accepted')
-    .or('owner_id.eq.' + user.id + ',member_id.eq.' + user.id)
+  // AS.auth.profile() (prof, above) is the shared session cache from
+  // actionsync-auth.js -- it only selects name columns (what IT needs,
+  // to detect an orphaned session), never photo_url or location. Using
+  // it for those meant your own photo/area always came back blank on a
+  // fresh load no matter what was actually saved -- the upload/save
+  // path was fine, nothing ever read the result back. Fetched directly
+  // here instead of widening a shared module's query for one caller.
+  return sb.from('profiles').select('name,display_name,first_name,last_name,username,photo_url,location')
+    .eq('id', user.id).maybeSingle().then(function(r){
+      if (r.data) {
+        myPerson.name = nameOfProfile(r.data) || myPerson.name;
+        myPerson.photo = r.data.photo_url || '';
+        myPerson.area = r.data.location || '';
+      }
+    }).catch(function(e){ console.warn('[friend-calendar] own profile load failed:', e && e.message); })
+    // Crew is symmetric (whoever hit "Add" owns the row), but this only
+    // ever checked owner_id = me -- so a friend who added YOU (you're
+    // member_id on their row, not owner_id) never showed up here at all:
+    // not just their blocks, nothing about them, even though every RLS
+    // policy on this data (blocks, profiles, threads...) already treats
+    // the relationship as symmetric. Matches that now.
+    .then(function(){ return sb.from('crew').select('owner_id,member_id').eq('status', 'accepted')
+    .or('owner_id.eq.' + user.id + ',member_id.eq.' + user.id); })
     .then(function(cr){
       var ids = (cr.data || []).map(function(r){ return r.owner_id === user.id ? r.member_id : r.owner_id; });
       ids = ids.filter(function(id, i){ return ids.indexOf(id) === i; });   // a genuinely mutual pair (both directions) would otherwise double up
