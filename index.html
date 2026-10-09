@@ -3734,10 +3734,12 @@ function renderAll(){
  * the plan this shipped from for why that's a deliberate next step, not
  * an oversight.
  * ---------------------------------------------------------------- */
-var _authMode = 'signin';   // 'signin' | 'signup'
+var _authMode = 'signin';   // 'signin' | 'signup' | 'reset' | 'newpassword'
 
 function renderAuthGate(){
   var body = document.getElementById('auth-gate-body');
+  if (_authMode === 'reset') return renderResetRequest(body);
+  if (_authMode === 'newpassword') return renderNewPassword(body);
   var isSignup = _authMode === 'signup';
   body.innerHTML =
       (isSignup ? '<div class="field"><label>Your name</label><input type="text" id="auth-name" maxlength="60"/></div>' : '')
@@ -3745,12 +3747,15 @@ function renderAuthGate(){
     + '<div class="field"><label>Password</label><input type="text" id="auth-pass" style="-webkit-text-security:disc;"/></div>'
     + '<div class="form-error" id="auth-error"></div>'
     + '<button class="btn" id="auth-submit" style="width:100%">' + (isSignup ? 'Create account' : 'Sign in') + '</button>'
+    + (isSignup ? '' : '<button class="btn ghost" id="auth-forgot" style="width:100%;margin-top:6px">Forgot password?</button>')
     + '<button class="btn ghost" id="auth-toggle" style="width:100%;margin-top:6px">'
       + (isSignup ? 'Already have an ActionSync account? Sign in' : 'New here? Create an account') + '</button>';
   document.getElementById('auth-toggle').addEventListener('click', function(){
     _authMode = isSignup ? 'signin' : 'signup';
     renderAuthGate();
   });
+  var forgot = document.getElementById('auth-forgot');
+  if (forgot) forgot.addEventListener('click', function(){ _authMode = 'reset'; renderAuthGate(); });
   document.getElementById('auth-submit').addEventListener('click', function(){
     var nameEl = document.getElementById('auth-name'), name = nameEl ? nameEl.value.trim() : '';
     var email = document.getElementById('auth-email').value.trim();
@@ -3771,6 +3776,50 @@ function renderAuthGate(){
         err.textContent = 'Check your email to confirm your account, then sign in.';
         _authMode = 'signin'; renderAuthGate(); return;
       }
+      boot();
+    });
+  });
+}
+// Step 1: ask for the email, send the reset link. Doesn't reveal
+// whether that email has an account -- same message either way, so
+// this can't be used to probe who's signed up.
+function renderResetRequest(body){
+  body.innerHTML = '<div style="font-size:13px;color:var(--soft);margin-bottom:14px">We’ll email you a link to set a new password.</div>'
+    + '<div class="field"><label>Email</label><input type="text" id="reset-email"/></div>'
+    + '<div class="form-error" id="reset-error"></div>'
+    + '<button class="btn" id="reset-send" style="width:100%">Send reset link</button>'
+    + '<button class="btn ghost" id="reset-back" style="width:100%;margin-top:6px">Back to sign in</button>';
+  document.getElementById('reset-back').addEventListener('click', function(){ _authMode = 'signin'; renderAuthGate(); });
+  document.getElementById('reset-send').addEventListener('click', function(){
+    var email = document.getElementById('reset-email').value.trim();
+    var err = document.getElementById('reset-error'), btn = document.getElementById('reset-send');
+    if (!email) { err.textContent = 'Enter the email on your account.'; return; }
+    err.textContent = ''; btn.disabled = true; btn.textContent = 'Sending…';
+    AS.auth.requestPasswordReset(email).then(function(res){
+      if (!res.ok) { btn.disabled = false; btn.textContent = 'Send reset link'; err.textContent = res.error || 'Something went wrong.'; return; }
+      body.innerHTML = '<div style="font-size:13px;color:var(--soft);margin-bottom:14px">If an account exists for that email, a reset link is on its way — check your inbox (and spam folder).</div>'
+        + '<button class="btn" id="reset-back2" style="width:100%">Back to sign in</button>';
+      document.getElementById('reset-back2').addEventListener('click', function(){ _authMode = 'signin'; renderAuthGate(); });
+    });
+  });
+}
+// Step 2: reached only by clicking the emailed link, which brings
+// Supabase's own short-lived recovery session back to this same page
+// (see the dispatch at the bottom of this file for how that's detected).
+function renderNewPassword(body){
+  body.innerHTML = '<div style="font-size:13px;color:var(--soft);margin-bottom:14px">Choose a new password for your account.</div>'
+    + '<div class="field"><label>New password</label><input type="text" id="np-pass" style="-webkit-text-security:disc;"/></div>'
+    + '<div class="field"><label>Confirm password</label><input type="text" id="np-pass2" style="-webkit-text-security:disc;"/></div>'
+    + '<div class="form-error" id="np-error"></div>'
+    + '<button class="btn" id="np-save" style="width:100%">Set new password</button>';
+  document.getElementById('np-save').addEventListener('click', function(){
+    var p1 = document.getElementById('np-pass').value, p2 = document.getElementById('np-pass2').value;
+    var err = document.getElementById('np-error'), btn = document.getElementById('np-save');
+    if (p1.length < 6) { err.textContent = 'At least 6 characters.'; return; }
+    if (p1 !== p2) { err.textContent = 'Passwords don’t match.'; return; }
+    err.textContent = ''; btn.disabled = true; btn.textContent = 'Saving…';
+    AS.auth.completePasswordReset(p1).then(function(res){
+      if (!res.ok) { btn.disabled = false; btn.textContent = 'Set new password'; err.textContent = res.error || 'Something went wrong.'; return; }
       boot();
     });
   });
@@ -4311,6 +4360,16 @@ if (/[?&]demo=1\b/.test(location.search)) {
   seedDemoData();
 } else {
   AS.auth.ready().then(function(state){
+    // A password-reset link lands back here already "signed in" (a
+    // short-lived recovery session) -- without this check that would
+    // just boot straight into the app instead of letting them set a
+    // new password.
+    if (AS.auth.isPasswordRecovery()) {
+      _authMode = 'newpassword';
+      document.getElementById('auth-gate').style.display = 'block';
+      renderAuthGate();
+      return;
+    }
     if (state.user) { boot(); return; }
     document.getElementById('auth-gate').style.display = 'block';
     renderAuthGate();

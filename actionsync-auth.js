@@ -36,6 +36,13 @@ window.AS = window.AS || {};
   var _profile = null;
   var _ready = null;
   var _listeners = [];
+  // Set when someone arrives via a password-reset email link -- Supabase
+  // fires a distinct PASSWORD_RECOVERY auth event for that, separate from
+  // a normal sign-in, so a page can tell "you're signed in" apart from
+  // "you just clicked a reset link and need to pick a new password" even
+  // though both leave _user set to a real, authenticated user.
+  var _recovery = false;
+  var _recoveryListeners = [];
 
   // ---- SDK loading -------------------------------------------------
   function loadSdk() {
@@ -123,6 +130,10 @@ window.AS = window.AS || {};
         window._sbReady = true;
 
         _client.auth.onAuthStateChange(function (event, session) {
+          if (event === 'PASSWORD_RECOVERY') {
+            _recovery = true;
+            _recoveryListeners.forEach(function (fn) { try { fn(); } catch (e) {} });
+          }
           _user = session ? session.user : null;
           window._meId = _user ? _user.id : null;
           _listeners.forEach(function (fn) { try { fn(_user); } catch (e) {} });
@@ -217,6 +228,39 @@ window.AS = window.AS || {};
         return { ok: true };
       }).catch(function (e) {
         return { ok: false, error: e && e.message };
+      });
+    },
+
+    // ---- Password reset -------------------------------------------
+    // Two-step, both self-serve, no dashboard access needed: request a
+    // reset email, then (once the emailed link lands back on this same
+    // page and Supabase fires PASSWORD_RECOVERY) set a new password.
+    // isPasswordRecovery()/onPasswordRecovery() let a page tell "you just
+    // clicked a reset link" apart from an ordinary signed-in visit, even
+    // though both leave user()/isSignedIn() looking the same.
+    isPasswordRecovery: function () { return _recovery; },
+    onPasswordRecovery: function (fn) { if (typeof fn === 'function') _recoveryListeners.push(fn); },
+
+    requestPasswordReset: function (email) {
+      return init().then(function () {
+        return _client.auth.resetPasswordForEmail(String(email || '').trim(), {
+          redirectTo: window.location.origin + window.location.pathname
+        });
+      }).then(function (res) {
+        return res.error ? { ok: false, error: res.error.message } : { ok: true };
+      });
+    },
+
+    // Only meaningful while isPasswordRecovery() is true -- updateUser()
+    // acts on whatever session is currently active, which during recovery
+    // is the short-lived one Supabase created from the emailed link.
+    completePasswordReset: function (newPassword) {
+      return init().then(function () {
+        return _client.auth.updateUser({ password: String(newPassword || '') });
+      }).then(function (res) {
+        if (res.error) return { ok: false, error: res.error.message };
+        _recovery = false;
+        return { ok: true };
       });
     },
 
