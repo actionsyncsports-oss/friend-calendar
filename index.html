@@ -1908,16 +1908,27 @@ function fmtTs(iso){
 // (liveAlerts(), further down) instead of being their own stored
 // notification rows, the same way nudgesFor() already works.
 function newThread(kind, title, memberIds, extra){
-  var t = { id:newId('th'), kind:kind, title:title, memberIds:memberIds.slice(), messages:[], read:{}, muted:{} };
+  var t = { id:newId('th'), kind:kind, title:title, memberIds:memberIds.slice(), messages:[], read:{}, muted:{}, _syncing:true };
   if (extra) Object.keys(extra).forEach(function(k){ t[k] = extra[k]; });
   THREADS.push(t);
-  syncNewThread(t);
+  syncNewThread(t).then(function(ok){
+    t._syncing = false;
+    // A failed insert here means this thread only ever existed in this
+    // tab -- nobody else can ever see it or anything sent into it, so
+    // drop it rather than leave a chat that quietly goes nowhere.
+    if (!ok) {
+      var i = THREADS.indexOf(t);
+      if (i !== -1) THREADS.splice(i, 1);
+      showToast('Couldn’t start that chat — try again.');
+      if (openThreadId === t.id) { openThreadId = null; stopMsgPoll(); renderMessagesList(); }
+    }
+  });
   return t;
 }
 function syncNewThread(t){
-  if (!(window.AS && AS.auth)) return Promise.resolve();
+  if (!(window.AS && AS.auth)) return Promise.resolve(true);
   var sb = AS.auth.client();
-  if (!sb) return Promise.resolve();
+  if (!sb) return Promise.resolve(true);
   return sb.from('friend_calendar_threads').insert({
     id:t.id, kind:t.kind, title:t.title || null, member_ids:t.memberIds,
     group_id:t.groupId || null, plan_id:t.planId || null, created_by:viewerId
@@ -1926,17 +1937,19 @@ function syncNewThread(t){
     // created this exact group/plan's thread a moment earlier -- not
     // an error, just means our local copy will get replaced by theirs
     // next time threads refresh.
-    if (r.error && r.error.code !== '23505') console.warn('[friend-calendar] thread create failed:', r.error.message);
+    if (r.error && r.error.code !== '23505') { console.warn('[friend-calendar] thread create failed:', r.error.message); return false; }
+    return true;
   });
 }
 function syncMessageInsert(t, m){
-  if (!(window.AS && AS.auth)) return;
+  if (!(window.AS && AS.auth)) return Promise.resolve(true);
   var sb = AS.auth.client();
-  if (!sb) return;
-  sb.from('friend_calendar_messages').insert({
+  if (!sb) return Promise.resolve(true);
+  return sb.from('friend_calendar_messages').insert({
     id:m.id, thread_id:t.id, from_user_id:m.from, text:m.text, sys:!!m.sys, created_at:m.ts
   }).then(function(r){
-    if (r.error) console.warn('[friend-calendar] message send failed:', r.error.message);
+    if (r.error) { console.warn('[friend-calendar] message send failed:', r.error.message); return false; }
+    return true;
   });
 }
 // Mute + read position are per-(thread,person) -- only sync the viewer's
@@ -1982,9 +1995,20 @@ function markRead(t, personId){
 function sendMessage(t, from, text, sys, ts){
   text = String(text || '').trim().slice(0, 600);
   if (!text) return null;
-  var m = { id:newId('m'), from: sys ? null : from, text:text, ts: ts || nowIso(), sys:!!sys };
+  var m = { id:newId('m'), from: sys ? null : from, text:text, ts: ts || nowIso(), sys:!!sys, _syncing:true };
   t.messages.push(m);
-  syncMessageInsert(t, m);
+  syncMessageInsert(t, m).then(function(ok){
+    m._syncing = false;
+    // Shown as sent locally the instant it's typed -- if the write
+    // never actually landed, nobody else will ever see it, so pull it
+    // back out rather than leave a message that looks sent forever.
+    if (!ok) {
+      var i = t.messages.indexOf(m);
+      if (i !== -1) t.messages.splice(i, 1);
+      showToast('Message didn’t send — try again.');
+      if (openThreadId === t.id) renderThread(t.id);
+    }
+  });
   if (!sys) {
     t.read[from] = m.ts;                                            // sending counts as having read everything so far
     if (from === viewerId) syncThreadState(t, viewerId);
@@ -2112,11 +2136,37 @@ function renderMessagesList(){
       + '<div class="tp">' + (last ? (last.sys ? '' : esc(last.from === viewerId ? 'You' : personById(last.from).name) + ': ') + esc(last.text) : 'No messages yet') + '</div></div>'
       + '<div class="tm">' + (last ? fmtTs(last.ts) : '') + (un ? ' · ' + un + ' new' : '') + '</div></div>';
   }).join('') : '<div style="color:var(--soft)">No chats yet. Start one below.</div>';
-  html += '<button class="btn" id="new-chat" style="margin-top:14px">New chat</button><button class="btn ghost" id="msg-close">Done</button>';
+  html += '<button class="btn" id="new-chat" style="margin-top:14px">New chat</button>'
+    + '<button class="btn ghost" id="msg-log">Message log</button>'
+    + '<button class="btn ghost" id="msg-close">Done</button>';
   var card = document.getElementById('sheet-card'); card.innerHTML = html;
   card.querySelectorAll('[data-thread]').forEach(function(r){ r.addEventListener('click', function(){ renderThread(r.dataset.thread); }); });
   document.getElementById('new-chat').addEventListener('click', renderNewChat);
+  document.getElementById('msg-log').addEventListener('click', renderMessageLog);
   document.getElementById('msg-close').addEventListener('click', function(){ stopMsgPoll(); closeSheet(); renderAll(); });
+}
+// One flat, newest-first feed of every message across every chat --
+// separate from the inbox above, which only shows each chat's latest
+// line. Read-only (tap a row to jump into that real conversation).
+function renderMessageLog(){
+  var mine = THREADS.filter(function(t){ return t.memberIds.indexOf(viewerId) !== -1; });
+  var rows = [];
+  mine.forEach(function(t){
+    t.messages.forEach(function(m){ if (!m.sys) rows.push({ t:t, m:m }); });
+  });
+  rows.sort(function(a, b){ return a.m.ts < b.m.ts ? 1 : a.m.ts > b.m.ts ? -1 : 0; });
+  var html = '<h4>Message log</h4>'
+    + '<div style="font-size:12px;color:var(--soft);margin-bottom:8px">Every message you’ve sent or received, across every chat.</div>';
+  html += rows.length ? rows.map(function(r){
+    var mineMsg = r.m.from === viewerId, who = personById(r.m.from);
+    return '<div class="thread-row" data-thread="' + r.t.id + '"><div style="min-width:0;flex:1"><div class="tt">' + esc(threadTitle(r.t, viewerId)) + '</div>'
+      + '<div class="tp">' + esc(mineMsg ? 'You' : (who ? who.name : 'Someone')) + ': ' + esc(r.m.text) + '</div></div>'
+      + '<div class="tm">' + fmtTs(r.m.ts) + '</div></div>';
+  }).join('') : '<div style="color:var(--soft)">No messages yet.</div>';
+  html += '<button class="btn ghost" id="log-back" style="margin-top:14px">Back</button>';
+  var card = document.getElementById('sheet-card'); card.innerHTML = html;
+  card.querySelectorAll('[data-thread]').forEach(function(r){ r.addEventListener('click', function(){ renderThread(r.dataset.thread); }); });
+  document.getElementById('log-back').addEventListener('click', renderMessagesList);
 }
 // Polls just the open thread, fast enough to feel roughly-live without
 // real-time infrastructure. Keeps whatever the person was mid-typing
@@ -3988,16 +4038,29 @@ function blockFromRow(row){
 function loadThreads(sb, myId){
   return sb.from('friend_calendar_threads').select('*').contains('member_ids', [myId])
     .then(function(tr){
-      THREADS = (tr.data || []).map(threadFromRow);
+      var synced = (tr.data || []).map(threadFromRow);
+      // A thread (or a message inside one) whose own insert hasn't
+      // resolved yet shouldn't vanish just because this refresh's
+      // SELECT ran first and raced it -- same protection loadPlans()
+      // already has, applied here too.
+      var syncedIds = synced.map(function(t){ return t.id; });
+      var stillSavingThreads = THREADS.filter(function(t){ return t._syncing && syncedIds.indexOf(t.id) === -1; });
+      THREADS = synced.concat(stillSavingThreads);
       var ids = THREADS.map(function(t){ return t.id; });
       if (!ids.length) return;
       return Promise.all([
         sb.from('friend_calendar_messages').select('*').in('thread_id', ids).order('created_at', { ascending:true }),
         sb.from('friend_calendar_thread_state').select('*').eq('user_id', myId).in('thread_id', ids)
       ]).then(function(res){
+        var msgsByThread = {};
         (res[0].data || []).forEach(function(row){
-          var t = threadById(row.thread_id);
-          if (t) t.messages.push(messageFromRow(row));
+          (msgsByThread[row.thread_id] = msgsByThread[row.thread_id] || []).push(messageFromRow(row));
+        });
+        THREADS.forEach(function(t){
+          var fresh = msgsByThread[t.id] || [];
+          var freshIds = fresh.map(function(m){ return m.id; });
+          var stillSavingMsgs = t.messages.filter(function(m){ return m._syncing && freshIds.indexOf(m.id) === -1; });
+          t.messages = fresh.concat(stillSavingMsgs);
         });
         (res[1].data || []).forEach(function(row){
           var t = threadById(row.thread_id);
