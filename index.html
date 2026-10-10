@@ -500,6 +500,12 @@ function bindTypeAhead(inputId, boxId, fetchOptions, onPick){
     if (!options.length) { box.style.display = 'none'; box.innerHTML = ''; return; }
     box.innerHTML = options.map(function(o, i){ return '<div class="ta-opt" data-i="' + i + '" style="padding:7px 10px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--rule)">' + esc(o) + '</div>'; }).join('');
     box.style.display = 'block';
+    // The field this hangs off can sit low in a long scrollable sheet --
+    // without this, the box renders real options below the visible
+    // screen (confirmed: on a field near the bottom, only a sliver of
+    // it was ever on-screen), which looked exactly like "there's no
+    // dropdown" even though one was there the whole time.
+    requestAnimationFrame(function(){ box.scrollIntoView({ block:'nearest' }); });
     box.querySelectorAll('.ta-opt').forEach(function(el){
       // mousedown, not click: fires before the input's blur closes the box
       el.addEventListener('mousedown', function(e){ e.preventDefault(); onPick(options[Number(el.dataset.i)]); box.style.display = 'none'; });
@@ -3585,7 +3591,8 @@ function renderAreaTab(card, me, tabs){
     + '<label class="check"><input type="checkbox" id="area-share"' + (me.shareArea !== false ? ' checked' : '') + '/> Friends can see my area</label>'
     + '<div class="field" style="position:relative"><label>Your time zone</label><input type="text" id="area-tz" maxlength="60" autocomplete="off" value="' + esc(me.timezone || myTimezoneGuess()) + '"/>'
       + '<div id="area-tz-box" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:5;background:var(--card);border:1.5px solid var(--rule);border-radius:8px;max-height:220px;overflow-y:auto;box-shadow:0 4px 14px rgba(0,0,0,0.12)"></div></div>'
-    + '<div style="font-size:12px;color:var(--soft);margin:-4px 0 8px">Set automatically from this device. Change it if you’re usually somewhere else, so friends in other zones see your free time at the right time for them.</div>'
+    + '<div class="form-error" id="area-tz-error"></div>'
+    + '<div style="font-size:12px;color:var(--soft);margin:-4px 0 8px">Set automatically from this device. Change it if you’re usually somewhere else, so friends in other zones see your free time at the right time for them. Pick one from the list -- typing a town name here won’t convert anyone’s times correctly.</div>'
     + '<div class="sec">Trips and travel</div>'
     + '<div style="font-size:13px;color:var(--soft);margin-bottom:6px">Away for a few days? Free time you offer on those dates is in that town, so friends there can see you’re around and friends at home know you’re not.</div>'
     + (tripsOf(me.id).length ? tripsOf(me.id).slice().sort(function(a, b){ return a.start < b.start ? -1 : 1; }).map(function(t){
@@ -3614,6 +3621,19 @@ function renderAreaTab(card, me, tabs){
   function commitArea(){
     var newShare = document.getElementById('area-share').checked;
     var newTz = document.getElementById('area-tz').value.trim() || myTimezoneGuess();
+    var tzErr = document.getElementById('area-tz-error');
+    // Only a real IANA zone converts times correctly -- a mistyped or
+    // half-typed value here used to save silently and quietly degrade
+    // every cross-timezone conversion to UTC (tzOffsetMinutesAt's own
+    // catch-all), which is exactly the "Toronto's 3pm shows as 3pm in
+    // Vancouver" bug. Refusing to save a value that isn't on the real
+    // list -- pick a suggestion, don't just type a city name here --
+    // keeps that from happening again.
+    if (ALL_TIMEZONES.indexOf(newTz) === -1) {
+      if (tzErr) tzErr.textContent = 'Pick a time zone from the list as you type -- "' + newTz + '" isn’t one.';
+      return false;
+    }
+    if (tzErr) tzErr.textContent = '';
     var changed = document.getElementById('area-me').value.trim() !== me.area;
     var shareChanged = newShare !== (me.shareArea !== false);
     var tzChanged = newTz !== (me.timezone || myTimezoneGuess());
@@ -3623,8 +3643,9 @@ function renderAreaTab(card, me, tabs){
     // profiles table -- they live in friend_calendar_profiles alongside
     // taste/avoids/colour.
     if (shareChanged || tzChanged) syncMyProfile();
+    return true;
   }
-  document.getElementById('taste-done').addEventListener('click', function(){ commitArea(); searchArea = null; closeSheet(); renderAll(); });
+  document.getElementById('taste-done').addEventListener('click', function(){ if (!commitArea()) return; searchArea = null; closeSheet(); renderAll(); });
 }
 function renderKidsTab(card, me, tabs){
   var kids = me.kids || (me.kids = []);
