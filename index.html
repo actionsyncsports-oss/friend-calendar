@@ -545,6 +545,49 @@ var REGION_ABBR = {
   'tennessee':'TN','texas':'TX','utah':'UT','vermont':'VT','virginia':'VA','washington':'WA','west virginia':'WV',
   'wisconsin':'WI','wyoming':'WY'
 };
+// Dominant IANA zone per region -- same keys as REGION_ABBR, same
+// caveat: several of these states/provinces really have more than one
+// zone (west Texas, the Idaho panhandle, Nunavut...). This picks
+// whichever zone covers most of that region's population, which is
+// right often enough to auto-fill a sensible default and never worse
+// than the alternative (silently keeping your HOME zone for a block
+// you're explicitly saying happens somewhere else). Someone on the
+// smaller side of a split region can still override it manually.
+var REGION_TZ = {
+  'british columbia':'America/Vancouver','alberta':'America/Edmonton','saskatchewan':'America/Regina',
+  'manitoba':'America/Winnipeg','ontario':'America/Toronto','quebec':'America/Toronto',
+  'new brunswick':'America/Moncton','nova scotia':'America/Halifax','prince edward island':'America/Halifax',
+  'newfoundland and labrador':'America/St_Johns','yukon':'America/Whitehorse',
+  'northwest territories':'America/Yellowknife','nunavut':'America/Iqaluit',
+  'alabama':'America/Chicago','alaska':'America/Anchorage','arizona':'America/Phoenix','arkansas':'America/Chicago',
+  'california':'America/Los_Angeles','colorado':'America/Denver','connecticut':'America/New_York',
+  'delaware':'America/New_York','florida':'America/New_York','georgia':'America/New_York','hawaii':'Pacific/Honolulu',
+  'idaho':'America/Denver','illinois':'America/Chicago','indiana':'America/New_York','iowa':'America/Chicago',
+  'kansas':'America/Chicago','kentucky':'America/New_York','louisiana':'America/Chicago','maine':'America/New_York',
+  'maryland':'America/New_York','massachusetts':'America/New_York','michigan':'America/New_York',
+  'minnesota':'America/Chicago','mississippi':'America/Chicago','missouri':'America/Chicago','montana':'America/Denver',
+  'nebraska':'America/Chicago','nevada':'America/Los_Angeles','new hampshire':'America/New_York',
+  'new jersey':'America/New_York','new mexico':'America/Denver','new york':'America/New_York',
+  'north carolina':'America/New_York','north dakota':'America/Chicago','ohio':'America/New_York',
+  'oklahoma':'America/Chicago','oregon':'America/Los_Angeles','pennsylvania':'America/New_York',
+  'rhode island':'America/New_York','south carolina':'America/New_York','south dakota':'America/Chicago',
+  'tennessee':'America/Chicago','texas':'America/Chicago','utah':'America/Denver','vermont':'America/New_York',
+  'virginia':'America/New_York','washington':'America/Los_Angeles','west virginia':'America/New_York',
+  'wisconsin':'America/Chicago','wyoming':'America/Denver'
+};
+// Countries with one zone covering virtually the whole country -- a
+// region-level table doesn't apply (most of these have no state/
+// province in Nominatim's address at all), so this keys off the ISO
+// country code instead. Left short and North-America-adjacent on
+// purpose; a country not listed here just means no auto-fill, not a
+// wrong one.
+var COUNTRY_TZ = {
+  'gb':'Europe/London','ie':'Europe/Dublin','fr':'Europe/Paris','de':'Europe/Berlin','es':'Europe/Madrid',
+  'it':'Europe/Rome','nl':'Europe/Amsterdam','be':'Europe/Brussels','ch':'Europe/Zurich','at':'Europe/Vienna',
+  'se':'Europe/Stockholm','no':'Europe/Oslo','dk':'Europe/Copenhagen','fi':'Europe/Helsinki','pl':'Europe/Warsaw',
+  'pt':'Europe/Lisbon','gr':'Europe/Athens','jp':'Asia/Tokyo','kr':'Asia/Seoul','sg':'Asia/Singapore',
+  'nz':'Pacific/Auckland','za':'Africa/Johannesburg','ae':'Asia/Dubai','th':'Asia/Bangkok'
+};
 function areaLabelFromNominatim(row){
   var a = row.address || {};
   var place = a.city || a.town || a.village || a.hamlet || a.municipality || a.county || row.name;
@@ -556,7 +599,18 @@ function areaLabelFromNominatim(row){
   else if (a.country) bits.push(a.country);
   return bits.join(', ');
 }
+// Best-effort only -- null (no auto-fill, caller falls back to the
+// person's own home zone) is always a safe answer; a wrong zone from
+// guessing too aggressively isn't.
+function areaTzFromNominatim(row){
+  var a = row.address || {};
+  var region = (a.state || a.province || '').toLowerCase();
+  if (REGION_TZ[region]) return REGION_TZ[region];
+  var cc = (a.country_code || '').toLowerCase();
+  return COUNTRY_TZ[cc] || null;
+}
 var _areaSearchCache = {};
+var _areaTzByLabel = {};
 function areaOptions(q){
   if (q.length < 2) return [];
   if (_areaSearchCache[q]) return Promise.resolve(_areaSearchCache[q]);
@@ -565,7 +619,7 @@ function areaOptions(q){
       var seen = {}, out = [];
       (rows || []).forEach(function(row){
         var label = areaLabelFromNominatim(row);
-        if (label && !seen[label]) { seen[label] = 1; out.push(label); }
+        if (label && !seen[label]) { seen[label] = 1; out.push(label); _areaTzByLabel[label] = areaTzFromNominatim(row); }
       });
       _areaSearchCache[q] = out;
       return out;
@@ -876,11 +930,18 @@ function blocksOnViewerDate(personId, date, viewer){
   var p = personById(personId), out = [];
   if (!p) return out;
   var viewerTz = tzOf(viewer), ownerTz = tzOf(personId), sameZone = viewerTz === ownerTz;
-  var ownerDates = sameZone ? [date] : [addDaysStr(date, -1), date, addDaysStr(date, 1)];
+  // A block offered somewhere other than home (tz set from the picked
+  // location in "Add free time") can need widening even when the
+  // person's own home zone happens to match the viewer's -- so widen
+  // whenever EITHER that's not true OR any block might carry its own
+  // zone, rather than deciding once from the person's home zone alone.
+  var hasBlockTz = p.blocks.some(function(b){ return !!b.tz; });
+  var ownerDates = (sameZone && !hasBlockTz) ? [date] : [addDaysStr(date, -1), date, addDaysStr(date, 1)];
   ownerDates.forEach(function(oDate){
     p.blocks.forEach(function(b){
       if (!blockApplies(b, oDate) || !canSee(b, personId, viewer)) return;
-      var win = sameZone ? { start:b.start, end:b.end } : convertWindowToViewerDay(oDate, b.start, b.end, ownerTz, viewerTz, date);
+      var bTz = b.tz || ownerTz, bSameZone = bTz === viewerTz;
+      var win = bSameZone ? { start:b.start, end:b.end } : convertWindowToViewerDay(oDate, b.start, b.end, bTz, viewerTz, date);
       if (win.end <= HMIN || win.start >= HMAX) return;   // converted window misses `date`'s displayed grid entirely
       out.push({ block:b, ownerDate:oDate, win:win });
     });
@@ -1340,8 +1401,9 @@ function renderFreeForm(date, editBlock){
     + '<div id="blk-location-fields">'
     + '<div class="field"><label>Where you’ll be</label><select id="blk-where"><option value="">' + esc(tripAreaOn(viewerId, date) || areaOf(viewerId) || 'My area') + (tripAreaOn(viewerId, date) ? ' (trip)' : ' (home)') + '</option>'
       + '<option value="@other">Somewhere else…</option></select></div>'
-    + '<div id="blk-other" style="' + (editBlock && editBlock.area ? '' : 'display:none') + '" class="field"><input type="text" id="blk-area" maxlength="60" list="blk-area-list" autocomplete="off" placeholder="Town, e.g. Nelson, BC" value="' + esc(editBlock ? editBlock.area || '' : '') + '"/>'
-      + '<datalist id="blk-area-list">' + allKnownAreas().map(function(a){ return '<option value="' + esc(a) + '"></option>'; }).join('') + '</datalist></div>'
+    + '<div id="blk-other" style="' + (editBlock && editBlock.area ? '' : 'display:none') + ';position:relative" class="field"><input type="text" id="blk-area" maxlength="60" autocomplete="off" placeholder="Town, e.g. Nelson, BC" value="' + esc(editBlock ? editBlock.area || '' : '') + '"/>'
+      + '<div id="blk-area-box" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:5;background:var(--card);border:1.5px solid var(--rule);border-radius:8px;max-height:220px;overflow-y:auto;box-shadow:0 4px 14px rgba(0,0,0,0.12)"></div>'
+      + '<div id="blk-tz-hint" style="font-size:11px;color:var(--soft);margin-top:4px">' + (editBlock && editBlock.tz ? 'Time zone: ' + esc(editBlock.tz) : '') + '</div></div>'
     + '<label class="check"><input type="checkbox" id="blk-travel"' + (editBlock && editBlock.travel ? ' checked' : '') + '/> I can travel to meet (nearby towns are fine)</label>'
     + '</div>'
     + '<div class="field"><label>Who can see this</label><select id="blk-vis"><option value="all">All my friends</option>'
@@ -1366,6 +1428,22 @@ function renderFreeForm(date, editBlock){
     document.getElementById('blk-other').style.display = this.value === '@other' ? 'block' : 'none';
   });
   if (editBlock && editBlock.area) document.getElementById('blk-where').value = '@other';
+  // Picking a real place here (same live search as My profile's area
+  // field) resolves its own time zone too -- shown right under the
+  // field so it's obvious this block will convert using THAT zone,
+  // not just your home one. Typing instead of picking leaves no match
+  // in _areaTzByLabel, so it falls back to your home zone at save time
+  // -- same as leaving this blank.
+  var blkTzHint = document.getElementById('blk-tz-hint');
+  bindTypeAhead('blk-area', 'blk-area-box', areaOptions, function(label){
+    document.getElementById('blk-area').value = label;
+    var tz = _areaTzByLabel[label];
+    blkTzHint.textContent = tz ? 'Time zone: ' + tz : 'Couldn’t tell the time zone for this one — defaulting to your home zone.';
+  });
+  document.getElementById('blk-area').addEventListener('input', function(){
+    var tz = _areaTzByLabel[this.value.trim()];
+    blkTzHint.textContent = tz ? 'Time zone: ' + tz : '';
+  });
   document.getElementById('blk-remote').addEventListener('change', function(){
     document.getElementById('blk-location-fields').style.display = this.checked ? 'none' : 'block';
   });
@@ -1393,6 +1471,11 @@ function renderFreeForm(date, editBlock){
     var remote = document.getElementById('blk-remote').checked;
     var where = document.getElementById('blk-where').value, areaTxt = document.getElementById('blk-area').value.trim();
     if (!remote && where === '@other' && !areaTxt) { err.textContent = 'Type the town, or choose your usual place.'; return; }
+    // Only set when areaTxt was actually picked from the live search
+    // (that's what populated _areaTzByLabel) -- free-typed text with no
+    // match falls back to null, same as leaving the field blank, which
+    // blocksOnViewerDate() then reads as "use my home zone."
+    var areaTz = (!remote && where === '@other' && areaTxt) ? (_areaTzByLabel[areaTxt] || null) : null;
     var repeat = editBlock ? (editBlock.repeat === 'weekly') : document.getElementById('blk-repeat').checked;
     var repeatWeeks = (!editBlock && repeat) ? document.getElementById('blk-repeat-weeks').value : '';
     if (editBlock) {
@@ -1401,6 +1484,7 @@ function renderFreeForm(date, editBlock){
       editBlock.area = (!remote && where === '@other') ? areaTxt : '';
       editBlock.travel = !remote && document.getElementById('blk-travel').checked;
       editBlock.remote = remote;
+      editBlock.tz = areaTz;
       syncBlockUpsert(editBlock);
       renderDaySheet(); renderCalendar();
       return;
@@ -1413,7 +1497,8 @@ function renderFreeForm(date, editBlock){
         level: document.getElementById('blk-level').value, visibleTo: visibleTo,
         area: (!remote && where === '@other') ? areaTxt : '',
         travel: !remote && document.getElementById('blk-travel').checked,
-        remote: remote
+        remote: remote,
+        tz: areaTz
       };
       viewer.blocks.push(blk);
       syncBlockUpsert(blk);
@@ -4049,7 +4134,7 @@ function blockFromRow(row){
   return { id:row.id, date:row.date, start:row.start_hour, end:row.end_hour,
     repeat:row.repeat || 'none', repeatUntil:row.repeat_until || null,
     level:row.level || 'free', visibleTo: row.visible_to == null ? 'all' : row.visible_to,
-    area:row.area || '', travel:!!row.travel, remote:!!row.remote,
+    area:row.area || '', travel:!!row.travel, remote:!!row.remote, tz:row.tz || null,
     cancelledDates: row.cancelled_dates || [] };
 }
 // Threads/messages were purely in-memory before this -- a message never
@@ -4280,7 +4365,7 @@ function syncBlockUpsert(b){
     id:b.id, user_id:viewerId, date:b.date, start_hour:b.start, end_hour:b.end,
     repeat:b.repeat || 'none', repeat_until:b.repeatUntil || null,
     level:b.level || 'free', visible_to: b.visibleTo == null ? 'all' : b.visibleTo,
-    area:b.area || '', travel:!!b.travel, remote:!!b.remote,
+    area:b.area || '', travel:!!b.travel, remote:!!b.remote, tz:b.tz || null,
     cancelled_dates:b.cancelledDates || [], updated_at:new Date().toISOString()
   }, { onConflict:'id' }).then(function(r){
     if (r.error) console.warn('[friend-calendar] block save failed:', r.error.message);
