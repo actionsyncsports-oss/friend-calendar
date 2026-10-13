@@ -113,6 +113,32 @@ window.AS = window.AS || {};
     });
   }
 
+  // Signup already sends the chosen name in auth.signUp()'s own
+  // options.data, which Supabase stores unconditionally in
+  // user_metadata -- unlike the profiles-table write that was
+  // supposed to copy it over, which depended on a session existing
+  // yet (missing for anyone requiring email confirmation, so it ran
+  // as anon and was silently rejected by RLS). This self-heals it on
+  // every real sign-in from here on: if the profile is still
+  // genuinely nameless but the metadata has a name sitting right
+  // there, copy it over now that there's definitely a real session.
+  // Never touches a profile that already has ANY name field set.
+  function backfillNameIfMissing(user, prof) {
+    if (!user || !prof) return;
+    if (prof.name || prof.display_name || prof.first_name || prof.last_name) return;
+    var meta = user.user_metadata || {};
+    var patch = {};
+    if (meta.name) patch.name = meta.name;
+    if (meta.display_name) patch.display_name = meta.display_name;
+    if (meta.first_name) patch.first_name = meta.first_name;
+    if (meta.last_name) patch.last_name = meta.last_name;
+    if (!Object.keys(patch).length) return;
+    _client.from('profiles').update(patch).eq('id', user.id).then(function (r) {
+      if (r.error) { console.warn('[auth] name backfill failed:', r.error.message); return; }
+      Object.assign(prof, patch);
+    });
+  }
+
   function clearDeviceIdentity() {
     // Identity only. Content (areas, logs, photos) is deliberately left
     // alone so signing out doesn't destroy someone's work.
@@ -148,6 +174,7 @@ window.AS = window.AS || {};
       })
       .then(function (prof) {
         _profile = prof;
+        backfillNameIfMissing(_user, _profile);
         return { user: _user, profile: _profile };
       })
       .catch(function (e) {
@@ -179,6 +206,7 @@ window.AS = window.AS || {};
         window._meId = _user ? _user.id : null;
         return validate(_user).then(function (prof) {
           _profile = prof;
+          backfillNameIfMissing(_user, prof);
           // Signed in but no profile row: let the caller send them to
           // onboarding to finish, rather than into a half-built account.
           return { ok: true, user: _user, profile: prof, needsProfile: !prof };
