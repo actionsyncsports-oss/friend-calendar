@@ -395,6 +395,18 @@ function tzOf(personId){
   var p = personById(personId);
   return (p && p.timezone) || myTimezoneGuess();
 }
+// tzOf()'s fallback is YOUR OWN device zone, which is a reasonable
+// default for yourself but actively misleading for someone else --
+// a friend who hasn't opened the app since time zones started saving
+// silently gets treated as "same zone as you," which looks identical
+// to them genuinely being in your zone. This is how the UI tells the
+// two apart (so "this one's time might be wrong" is visible instead
+// of silently assumed).
+function hasKnownTz(personId){
+  if (personId === viewerId) return true;
+  var p = personById(personId);
+  return !!(p && p.timezone);
+}
 var _tzGuess = null;
 function myTimezoneGuess(){
   if (_tzGuess) return _tzGuess;
@@ -1299,7 +1311,8 @@ function renderDaySheet(){
       + segmentsFor(id, date).map(function(g){
           return '<div class="bar' + (g.lvl === 1 ? ' open' : '') + '" style="--c:' + p.color + ';left:' + ((g.s - HMIN) / span * 100) + '%;width:' + ((g.e - g.s) / span * 100) + '%"></div>';
         }).join('')
-      + '</div><div class="lanearea">' + esc(placeLabelFor(id, date)) + '</div></div>';
+      + '</div><div class="lanearea">' + esc(placeLabelFor(id, date))
+      + (hasKnownTz(id) ? '' : ' <span style="color:var(--busy)" title="They haven’t opened the app since time zones started saving, so this is showing as your own zone and may be off.">⚠ time zone unknown</span>') + '</div></div>';
   });
 
   // --- the viewer's own blocks for this day, and a way to add one ---
@@ -2032,15 +2045,23 @@ function syncNewThread(t){
     return true;
   });
 }
+// Resolves null on success, or the real error message on failure --
+// a plain true/false here was enough to roll the optimistic message
+// back, but gave no way to show WHY, which is exactly what's needed
+// to tell "RLS rejected this" apart from "network timed out" apart
+// from "the table doesn't have this column."
 function syncMessageInsert(t, m){
-  if (!(window.AS && AS.auth)) return Promise.resolve(true);
+  if (!(window.AS && AS.auth)) return Promise.resolve(null);
   var sb = AS.auth.client();
-  if (!sb) return Promise.resolve(true);
+  if (!sb) return Promise.resolve('Not signed in.');
   return sb.from('friend_calendar_messages').insert({
     id:m.id, thread_id:t.id, from_user_id:m.from, text:m.text, sys:!!m.sys, created_at:m.ts
   }).then(function(r){
-    if (r.error) { console.warn('[friend-calendar] message send failed:', r.error.message); return false; }
-    return true;
+    if (r.error) { console.warn('[friend-calendar] message send failed:', r.error.message); return r.error.message || 'Unknown error'; }
+    return null;
+  }, function(e){
+    console.warn('[friend-calendar] message send threw:', e && e.message);
+    return (e && e.message) || 'Network error';
   });
 }
 // Mute + read position are per-(thread,person) -- only sync the viewer's
@@ -2088,15 +2109,21 @@ function sendMessage(t, from, text, sys, ts){
   if (!text) return null;
   var m = { id:newId('m'), from: sys ? null : from, text:text, ts: ts || nowIso(), sys:!!sys, _syncing:true };
   t.messages.push(m);
-  syncMessageInsert(t, m).then(function(ok){
+  syncMessageInsert(t, m).then(function(errMsg){
     m._syncing = false;
     // Shown as sent locally the instant it's typed -- if the write
     // never actually landed, nobody else will ever see it, so pull it
     // back out rather than leave a message that looks sent forever.
-    if (!ok) {
+    if (errMsg) {
       var i = t.messages.indexOf(m);
       if (i !== -1) t.messages.splice(i, 1);
       showToast('Message didn’t send — try again.');
+      // A toast fades in 2.6s and is easy to miss on a phone -- this
+      // stays on screen (in the thread itself) with the REAL reason
+      // until the thread is closed, specifically so a failure that
+      // keeps happening can actually be diagnosed instead of just
+      // looking like silence.
+      t._lastSendError = errMsg;
       if (openThreadId === t.id) renderThread(t.id);
     }
   });
@@ -2294,6 +2321,7 @@ function renderThread(id){
         var mineMsg = m.from === viewerId;
         return '<div class="msg' + (mineMsg ? ' mine' : '') + '"><div class="who">' + (mineMsg ? '' : esc(personById(m.from).name) + ', ') + fmtTs(m.ts) + '</div><div class="bub">' + esc(m.text) + '</div></div>';
       }).join('') : '<div style="color:var(--soft);font-size:14px">Nothing here yet. Say something.</div>') + '</div>'
+    + (t._lastSendError ? '<div class="form-error" style="margin-top:6px">Last message failed to send: ' + esc(t._lastSendError) + '</div>' : '')
     + '<div class="composer"><input type="text" id="msg-input" maxlength="600" placeholder="Message" autocomplete="off"/><button class="btn" id="msg-send">Send</button></div>'
     + '<div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
     + '<button class="btn ghost" id="thread-back">All messages</button>'
@@ -2303,6 +2331,7 @@ function renderThread(id){
   var box = document.getElementById('msgs'); box.scrollTop = box.scrollHeight;
   function send(){
     var inp = document.getElementById('msg-input');
+    t._lastSendError = null;   // this attempt's own result (success or new error) replaces whatever's shown now
     if (sendMessage(t, viewerId, inp.value)) { renderThread(id); renderBadges(); document.getElementById('msg-input').focus(); }
   }
   document.getElementById('msg-send').addEventListener('click', send);
