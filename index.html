@@ -2029,14 +2029,30 @@ function newThread(kind, title, memberIds, extra){
   });
   return t;
 }
+// A Supabase call on a slow/flaky mobile connection can just hang --
+// no error, no success, the promise never settles -- which left a
+// sent-looking message or a just-started chat stuck forever with no
+// rollback and no error shown, because the .then() that would do
+// either simply never ran. This forces a definite answer after `ms`:
+// the real request is left running (so a late success still lands,
+// it's just not waited on), but the CALLER always hears back one way
+// or the other instead of waiting indefinitely.
+function withTimeout(promise, ms){
+  return Promise.race([
+    promise,
+    new Promise(function(resolve){
+      setTimeout(function(){ resolve({ error:{ message:'Timed out — check your connection and try again.' } }); }, ms);
+    })
+  ]);
+}
 function syncNewThread(t){
   if (!(window.AS && AS.auth)) return Promise.resolve(true);
   var sb = AS.auth.client();
   if (!sb) return Promise.resolve(true);
-  return sb.from('friend_calendar_threads').insert({
+  return withTimeout(sb.from('friend_calendar_threads').insert({
     id:t.id, kind:t.kind, title:t.title || null, member_ids:t.memberIds,
     group_id:t.groupId || null, plan_id:t.planId || null, created_by:viewerId
-  }).then(function(r){
+  }), 10000).then(function(r){
     // A unique-index conflict here means another member's session
     // created this exact group/plan's thread a moment earlier -- not
     // an error, just means our local copy will get replaced by theirs
@@ -2054,9 +2070,9 @@ function syncMessageInsert(t, m){
   if (!(window.AS && AS.auth)) return Promise.resolve(null);
   var sb = AS.auth.client();
   if (!sb) return Promise.resolve('Not signed in.');
-  return sb.from('friend_calendar_messages').insert({
+  return withTimeout(sb.from('friend_calendar_messages').insert({
     id:m.id, thread_id:t.id, from_user_id:m.from, text:m.text, sys:!!m.sys, created_at:m.ts
-  }).then(function(r){
+  }), 10000).then(function(r){
     if (r.error) { console.warn('[friend-calendar] message send failed:', r.error.message); return r.error.message || 'Unknown error'; }
     return null;
   }, function(e){
