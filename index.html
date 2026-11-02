@@ -802,6 +802,7 @@ function bindPhotoRow(card, redraw){
 /* ---------------- STATE ---------------- */
 var viewerId = null;      // set once, to the real signed-in user's id, in loadPeopleAndGroups()
 var selectedIds = [];     // who's counted when looking for overlap -- filled in alongside viewerId
+var peopleSearch = '';    // typed into the "Counting" bar's find box -- narrows which person chips show, not who's selected
 var viewYear = new Date().getFullYear(), viewMonth = new Date().getMonth();
 var openDate = null;
 var viewMode = 'month';          // 'month' | 'week'
@@ -1080,7 +1081,6 @@ function dayAnalysis(date, ids, viewer){
 function sameSet(a, b){ return a.length === b.length && a.every(function(x){ return b.indexOf(x) !== -1; }); }
 function renderFilters(){
   var el = document.getElementById('filters');
-  var others = othersOrdered();
   var html = '<span class="lbl">Counting</span>';
   html += '<button class="chip group" data-all="1">Everyone</button>';
   html += GROUPS.map(function(g){
@@ -1088,10 +1088,18 @@ function renderFilters(){
     var on = sameSet(members, selectedIds.filter(function(id){ return id !== viewerId; }));
     return '<button class="chip group' + (on ? ' on' : '') + '" data-group="' + g.id + '">' + esc(g.name) + '</button>';
   }).join('');
-  html += others.map(function(p){
-    var on = selectedIds.indexOf(p.id) !== -1;
-    return '<button class="chip' + (on ? ' on' : '') + '" data-person="' + p.id + '" title="' + esc(friendNote(viewerId, p.id)) + '">' + avatarHtml(p, 18) + esc(p.name) + '</button>';
-  }).join('');
+  // A plain text filter rather than another selector to learn -- with
+  // a big crew, scanning every chip to find one name was the actual
+  // complaint. Hidden below a handful of friends, where there's
+  // nothing to search through yet. Only narrows which chips are
+  // SHOWN; selectedIds (who's actually counted) never changes just
+  // from typing here, so search text can't silently drop someone from
+  // the comparison.
+  if (othersOrdered().length > 8) {
+    html += '<input type="text" id="people-search" placeholder="Find…" value="' + esc(peopleSearch)
+      + '" autocomplete="off" style="border:none;border-bottom:1.5px solid var(--rule);background:transparent;font:500 14px var(--sans);color:var(--ink);padding:2px 4px;width:110px"/>';
+  }
+  html += '<span id="people-chips"></span>';
   html += '<button class="btn small ghost" id="add-friend-btn">+ Friend</button>';
   html += '<button class="btn small ghost" id="add-group-btn">+ Group</button>';
   el.innerHTML = html;
@@ -1107,13 +1115,29 @@ function renderFilters(){
       renderAll();
     });
   });
-  el.querySelectorAll('[data-person]').forEach(function(b){
-    b.addEventListener('click', function(){
-      var id = b.dataset.person, i = selectedIds.indexOf(id);
-      if (i === -1) selectedIds.push(id); else selectedIds.splice(i, 1);
-      renderAll();
+  // Its own render, separate from the rest of the bar above, so typing
+  // a letter only ever touches this span -- replacing the search
+  // input itself on every keystroke would drop its focus and cursor
+  // position (and dismiss the keyboard on a phone) after each one.
+  function renderPeopleChips(){
+    var q = peopleSearch.trim().toLowerCase();
+    var others = othersOrdered().filter(function(p){ return !q || p.name.toLowerCase().indexOf(q) !== -1; });
+    var chips = document.getElementById('people-chips');
+    chips.innerHTML = others.length ? others.map(function(p){
+      var on = selectedIds.indexOf(p.id) !== -1;
+      return '<button class="chip' + (on ? ' on' : '') + '" data-person="' + p.id + '" title="' + esc(friendNote(viewerId, p.id)) + '">' + avatarHtml(p, 18) + esc(p.name) + '</button>';
+    }).join('') : (q ? '<span class="lbl">No one matches “' + esc(peopleSearch.trim()) + '”</span>' : '');
+    chips.querySelectorAll('[data-person]').forEach(function(b){
+      b.addEventListener('click', function(){
+        var id = b.dataset.person, i = selectedIds.indexOf(id);
+        if (i === -1) selectedIds.push(id); else selectedIds.splice(i, 1);
+        renderAll();
+      });
     });
-  });
+  }
+  renderPeopleChips();
+  var searchInput = document.getElementById('people-search');
+  if (searchInput) searchInput.addEventListener('input', function(){ peopleSearch = this.value; renderPeopleChips(); });
   document.getElementById('add-friend-btn').addEventListener('click', openAddFriend);
   document.getElementById('add-group-btn').addEventListener('click', openAddGroup);
 }
