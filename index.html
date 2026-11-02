@@ -1096,8 +1096,12 @@ function renderFilters(){
   // from typing here, so search text can't silently drop someone from
   // the comparison.
   if (othersOrdered().length > 8) {
-    html += '<input type="text" id="people-search" placeholder="Find…" value="' + esc(peopleSearch)
-      + '" autocomplete="off" style="border:none;border-bottom:1.5px solid var(--rule);background:transparent;font:500 14px var(--sans);color:var(--ink);padding:2px 4px;width:110px"/>';
+    // flex-basis:100% forces this onto its own line in the wrapping
+    // flex row above -- inline with "Everyone"/the group chips, it sat
+    // crammed right up against "Friends" with no breathing room.
+    html += '<input type="text" id="people-search" placeholder="Find a friend…" value="' + esc(peopleSearch)
+      + '" autocomplete="off" style="flex-basis:100%;border:1.5px solid var(--rule);border-radius:20px;background:transparent;'
+      + 'font:500 14px var(--sans);color:var(--ink);padding:7px 14px;max-width:260px;margin:2px 0 4px"/>';
   }
   html += '<span id="people-chips"></span>';
   html += '<button class="btn small ghost" id="add-friend-btn">+ Friend</button>';
