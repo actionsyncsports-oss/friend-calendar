@@ -803,6 +803,7 @@ function bindPhotoRow(card, redraw){
 var viewerId = null;      // set once, to the real signed-in user's id, in loadPeopleAndGroups()
 var selectedIds = [];     // who's counted when looking for overlap -- filled in alongside viewerId
 var peopleSearch = '';    // typed into the "Counting" bar's find box -- narrows which person chips show, not who's selected
+var activeGroupId = null; // which group chip (if any) the person-chip row is currently scoped to -- null = Everyone
 var viewYear = new Date().getFullYear(), viewMonth = new Date().getMonth();
 var openDate = null;
 var viewMode = 'month';          // 'month' | 'week'
@@ -1078,15 +1079,14 @@ function dayAnalysis(date, ids, viewer){
 // "Viewing as" (simulating any person on one device) is gone -- viewerId
 // is now always the real signed-in user, set once in loadPeopleAndGroups().
 
-function sameSet(a, b){ return a.length === b.length && a.every(function(x){ return b.indexOf(x) !== -1; }); }
 function renderFilters(){
   var el = document.getElementById('filters');
+  var activeGroup = activeGroupId ? GROUPS.filter(function(g){ return g.id === activeGroupId; })[0] : null;
+  if (!activeGroup) activeGroupId = null;   // the active group got deleted/renamed away from under us -- fall back to Everyone
   var html = '<span class="lbl">Counting</span>';
-  html += '<button class="chip group" data-all="1">Everyone</button>';
+  html += '<button class="chip group' + (activeGroupId ? '' : ' on') + '" data-all="1">Everyone</button>';
   html += GROUPS.map(function(g){
-    var members = g.memberIds.filter(function(id){ return id !== viewerId; });
-    var on = sameSet(members, selectedIds.filter(function(id){ return id !== viewerId; }));
-    return '<button class="chip group' + (on ? ' on' : '') + '" data-group="' + g.id + '">' + esc(g.name) + '</button>';
+    return '<button class="chip group' + (g.id === activeGroupId ? ' on' : '') + '" data-group="' + g.id + '">' + esc(g.name) + '</button>';
   }).join('');
   // A plain text filter rather than another selector to learn -- with
   // a big crew, scanning every chip to find one name was the actual
@@ -1104,28 +1104,43 @@ function renderFilters(){
       + 'font:500 14px var(--sans);color:var(--ink);padding:7px 14px;max-width:260px;margin:2px 0 4px"/>';
   }
   html += '<span id="people-chips"></span>';
+  // Only the group's owner can actually save changes (crew_groups_own
+  // is owner-only at the RLS level) -- showing this to a member who'd
+  // just hit a permission error on save isn't worth the confusion.
+  if (activeGroup && activeGroup.ownerId === viewerId) html += '<button class="btn small ghost" id="edit-group-btn">Edit group</button>';
   html += '<button class="btn small ghost" id="add-friend-btn">+ Friend</button>';
   html += '<button class="btn small ghost" id="add-group-btn">+ Group</button>';
   el.innerHTML = html;
 
   el.querySelector('[data-all]').addEventListener('click', function(){
+    activeGroupId = null;
     selectedIds = PEOPLE.map(function(p){ return p.id; });
     renderAll();
   });
   el.querySelectorAll('[data-group]').forEach(function(b){
     b.addEventListener('click', function(){
       var g = GROUPS.filter(function(x){ return x.id === b.dataset.group; })[0];
+      activeGroupId = g.id;
       selectedIds = g.memberIds.slice();
       renderAll();
     });
   });
+  var editBtn = document.getElementById('edit-group-btn');
+  if (editBtn) editBtn.addEventListener('click', function(){ openEditGroup(activeGroup); });
   // Its own render, separate from the rest of the bar above, so typing
   // a letter only ever touches this span -- replacing the search
   // input itself on every keystroke would drop its focus and cursor
   // position (and dismiss the keyboard on a phone) after each one.
   function renderPeopleChips(){
     var q = peopleSearch.trim().toLowerCase();
-    var others = othersOrdered().filter(function(p){ return !q || p.name.toLowerCase().indexOf(q) !== -1; });
+    // Selecting a group used to only change WHO's highlighted/counted
+    // -- every one of 50 people still showed as a chip either way,
+    // which was the actual complaint ("only that group's people
+    // should be in that section"). Now the row itself is scoped to
+    // the active group's roster; "Everyone" (or picking a different
+    // group) is what brings the rest back.
+    var pool = activeGroup ? othersOrdered().filter(function(p){ return activeGroup.memberIds.indexOf(p.id) !== -1; }) : othersOrdered();
+    var others = pool.filter(function(p){ return !q || p.name.toLowerCase().indexOf(q) !== -1; });
     var chips = document.getElementById('people-chips');
     chips.innerHTML = others.length ? others.map(function(p){
       var on = selectedIds.indexOf(p.id) !== -1;
@@ -1994,7 +2009,7 @@ function openAddGroup(){
           .then(function(mr){ if (mr.error) throw mr.error; return r.data; });
       })
       .then(function(row){
-        var ng = { id:row.id, name:row.name, memberIds:[viewerId].concat(memberIds) };
+        var ng = { id:row.id, name:row.name, memberIds:[viewerId].concat(memberIds), ownerId:viewerId };
         GROUPS.push(ng); ensureGroupThread(ng);
         closeSheet(); renderAll();
       })
@@ -2002,6 +2017,69 @@ function openAddGroup(){
         btn.disabled = false; btn.textContent = 'Create';
         err.textContent = 'Could not create group: ' + (e && e.message);
       });
+  });
+}
+// Renaming/re-membering an EXISTING group -- openAddGroup() above only
+// ever creates a new one. Owner-only (crew_groups_own/
+// crew_group_members_owner are both owner-scoped in RLS), which
+// renderFilters() already checked before ever showing the button that
+// gets here.
+function openEditGroup(g){
+  var card = document.getElementById('sheet-card');
+  card.innerHTML = '<h4>Edit group</h4>'
+    + '<div class="field"><label>Group name</label><input type="text" id="gr-name" value="' + esc(g.name) + '"/></div>'
+    + '<div class="sec">Members</div>'
+    + PEOPLE.filter(function(p){ return p.id !== viewerId; })
+        .map(function(p){ return '<label class="check"><input type="checkbox" class="gr-member" value="' + p.id + '"' + (g.memberIds.indexOf(p.id) !== -1 ? ' checked' : '') + '/>' + esc(p.name) + '</label>'; }).join('')
+    + '<div class="form-error" id="gr-error"></div>'
+    + '<button class="btn" id="gr-save" style="width:100%">Save changes</button>'
+    + '<button class="btn ghost danger" id="gr-delete" style="width:100%;margin-top:6px">Delete group</button>'
+    + '<button class="btn ghost" id="gr-cancel" style="width:100%;margin-top:6px">Cancel</button>';
+  openSheet();
+  document.getElementById('gr-cancel').addEventListener('click', closeSheet);
+  document.getElementById('gr-save').addEventListener('click', function(){
+    var name = document.getElementById('gr-name').value.trim();
+    var err = document.getElementById('gr-error');
+    if (!name) { err.textContent = 'Needs a name.'; return; }
+    var memberIds = Array.from(document.querySelectorAll('.gr-member:checked')).map(function(cb){ return cb.value; });
+    if (!memberIds.length) { err.textContent = 'Pick at least one person.'; return; }
+    var before = g.memberIds.filter(function(id){ return id !== viewerId; });
+    var toAdd = memberIds.filter(function(id){ return before.indexOf(id) === -1; });
+    var toRemove = before.filter(function(id){ return memberIds.indexOf(id) === -1; });
+    var btn = document.getElementById('gr-save');
+    btn.disabled = true; btn.textContent = 'Saving…';
+    var sb = AS.auth.client();
+    sb.from('crew_groups').update({ name:name }).eq('id', g.id).then(function(r){
+      if (r.error) throw r.error;
+      return Promise.all([
+        toAdd.length ? sb.from('crew_group_members').insert(toAdd.map(function(id){ return { group_id:g.id, member_id:id }; })).then(function(ar){ if (ar.error) throw ar.error; }) : null,
+        toRemove.length ? sb.from('crew_group_members').delete().eq('group_id', g.id).in('member_id', toRemove).then(function(rr){ if (rr.error) throw rr.error; }) : null
+      ]);
+    }).then(function(){
+      g.name = name; g.memberIds = [viewerId].concat(memberIds);
+      if (activeGroupId === g.id) selectedIds = g.memberIds.slice();
+      closeSheet(); renderAll();
+    }).catch(function(e){
+      btn.disabled = false; btn.textContent = 'Save changes';
+      err.textContent = 'Could not save: ' + (e && e.message);
+    });
+  });
+  document.getElementById('gr-delete').addEventListener('click', function(){
+    if (!window.confirm('Delete "' + g.name + '"? This removes the group for everyone in it.')) return;
+    var btn = document.getElementById('gr-delete');
+    btn.disabled = true; btn.textContent = 'Deleting…';
+    var sb = AS.auth.client();
+    // ON DELETE CASCADE on crew_group_members' own FK handles the
+    // membership rows; nothing else to clean up client-side.
+    sb.from('crew_groups').delete().eq('id', g.id).then(function(r){
+      if (r.error) throw r.error;
+      GROUPS = GROUPS.filter(function(x){ return x.id !== g.id; });
+      if (activeGroupId === g.id) { activeGroupId = null; selectedIds = PEOPLE.map(function(p){ return p.id; }); }
+      closeSheet(); renderAll();
+    }).catch(function(e){
+      btn.disabled = false; btn.textContent = 'Delete group';
+      document.getElementById('gr-error').textContent = 'Could not delete: ' + (e && e.message);
+    });
   });
 }
 
@@ -4089,7 +4167,7 @@ function loadGroups(sb, myId){
           var ids = [g.owner_id].concat(membersByGroup[g.id] || []);
           var seen = {};
           ids = ids.filter(function(id){ return seen[id] ? false : (seen[id] = true); });
-          return { id:g.id, name:g.name, memberIds:ids };
+          return { id:g.id, name:g.name, memberIds:ids, ownerId:g.owner_id };
         });
       });
   });
@@ -4552,7 +4630,7 @@ function seedDemoData(){
     // 9pm here.
     { id:'demo-sam', name:'Sam', color:PERSON_COLORS[2], area:'', shareArea:true, blocks:[], timezone:'America/Toronto' }
   ];
-  GROUPS = [ { id:'demo-g1', name:'Ski crew', memberIds:['demo-me', 'demo-jess', 'demo-sam'] } ];
+  GROUPS = [ { id:'demo-g1', name:'Ski crew', memberIds:['demo-me', 'demo-jess', 'demo-sam'], ownerId:'demo-me' } ];
   GROUPS.forEach(ensureGroupThread);   // syncNewThread() no-ops: AS.auth.client() is stubbed to null above
   selectedIds = PEOPLE.map(function(p){ return p.id; });
 
