@@ -1778,6 +1778,70 @@ function renderEditPlan(plan){
 
 /* ---------------- PLANS LIST + RSVP ---------------- */
 var RSVP_LABEL = { going:'Going', maybe:'Maybe', no:'Can’t' };
+/* ---------------- ADD TO CALENDAR (.ics) ---------------- */
+// A standard calendar file that Google Calendar, Apple Calendar, Outlook and
+// the phone's own calendar all open. Times are written as exact UTC instants
+// (worked out from the OWNER's time zone with the same zone math the day grid
+// uses), so a plan at 3pm Toronto time lands at the right moment on a
+// Vancouver friend's calendar -- no floating "3pm" that each app guesses at.
+function icsText(v){ return String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n'); }
+function icsStamp(ms){ var d = new Date(ms); return d.getUTCFullYear() + pad(d.getUTCMonth() + 1) + pad(d.getUTCDate()) + 'T' + pad(d.getUTCHours()) + pad(d.getUTCMinutes()) + pad(d.getUTCSeconds()) + 'Z'; }
+// Lines longer than 75 bytes must be folded; counting BYTES (not characters)
+// and never splitting a character, so names with accents/emoji survive.
+function icsFold(line){
+  var enc = new TextEncoder(), out = [], cur = '', bytes = 0;
+  for (var ch of line) {
+    var b = enc.encode(ch).length;
+    if (bytes + b > 73) { out.push(cur); cur = ' '; bytes = 1; }
+    cur += ch; bytes += b;
+  }
+  out.push(cur);
+  return out.join('\r\n');
+}
+function planToCalItem(p){
+  var going = Object.keys(p.rsvps).filter(function(id){ return p.rsvps[id] === 'going'; }).map(function(id){ return personById(id).name; });
+  return { uid:p.id, title:p.title, date:p.date, start:p.start, end:p.end, tz:tzOf(p.creatorId),
+    location:[p.spot, p.area].filter(Boolean).join(', '),
+    desc:[p.notes, 'Set up by ' + personById(p.creatorId).name + '.', going.length ? 'Going: ' + going.join(', ') + '.' : ''].filter(Boolean).join(' ') };
+}
+function eventToCalItem(ev){
+  return { uid:ev.id, title:ev.title, date:ev.date, start:ev.start, end:ev.end, allDay:ev.allDay, tz:tzOf(ev.by),
+    location:ev.area || '', desc:[ev.note, ev.url].filter(Boolean).join(' ') };
+}
+function buildIcs(items){
+  var now = icsStamp(Date.now());
+  var lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Friend Calendar//EN', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH', 'X-WR-CALNAME:Friend Calendar'];
+  items.forEach(function(it){
+    lines.push('BEGIN:VEVENT', 'UID:' + it.uid + '@friend-calendar', 'DTSTAMP:' + now);
+    if (it.allDay || it.start == null || it.end == null) {
+      lines.push('DTSTART;VALUE=DATE:' + it.date.replace(/-/g, ''), 'DTEND;VALUE=DATE:' + addDaysStr(it.date, 1).replace(/-/g, ''));
+    } else {
+      lines.push('DTSTART:' + icsStamp(zonedWallClockToUtc(it.date, it.start, it.tz)), 'DTEND:' + icsStamp(zonedWallClockToUtc(it.date, it.end, it.tz)));
+    }
+    lines.push('SUMMARY:' + icsText(it.title));
+    if (it.location) lines.push('LOCATION:' + icsText(it.location));
+    if (it.desc) lines.push('DESCRIPTION:' + icsText(it.desc));
+    lines.push('END:VEVENT');
+  });
+  lines.push('END:VCALENDAR');
+  return lines.map(icsFold).join('\r\n') + '\r\n';
+}
+function downloadIcs(filename, items){
+  if (!items.length) { showToast('Nothing to add yet.'); return; }
+  var url = URL.createObjectURL(new Blob([buildIcs(items)], { type:'text/calendar;charset=utf-8' }));
+  var a = document.createElement('a');
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+  setTimeout(function(){ document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
+  showToast('Open the downloaded file to add it to your calendar.');
+}
+// Everything you're actually committed to: plans you're in (not declined),
+// plus events you marked Interested.
+function myCalendarItems(){
+  var plans = PLANS.filter(function(p){ return p.rsvps[viewerId] && p.rsvps[viewerId] !== 'no'; }).map(planToCalItem);
+  var evs = EVENTS.filter(function(ev){ return ev.interested && ev.interested[viewerId]; }).map(eventToCalItem);
+  return plans.concat(evs);
+}
+
 function renderPlans(){
   var el = document.getElementById('plans');
   // Each person only sees plans THEY are part of -- the same rule real
@@ -1789,7 +1853,7 @@ function renderPlans(){
   var seeing = PLANS.filter(function(p){ return !p.rsvps[viewerId] && canSeePlan(p, viewerId); })
     .sort(function(a, b){ return a.date < b.date ? -1 : a.date > b.date ? 1 : a.start - b.start; });
   if (!mine.length && !seeing.length) { el.innerHTML = ''; return; }
-  var html = mine.length ? '<h3>Plans (' + esc(personById(viewerId).name) + ')</h3>' : '';
+  var html = mine.length ? '<h3>Plans (' + esc(personById(viewerId).name) + ') <button class="btn small ghost" id="plans-ics-all" style="margin-left:8px;vertical-align:middle">Add all to my calendar</button></h3>' : '';
   mine.forEach(function(p){
     var creator = personById(p.creatorId);
     var who = Object.keys(p.rsvps).map(function(id){
@@ -1806,7 +1870,7 @@ function renderPlans(){
         return '<button class="rsvp-btn' + (p.rsvps[viewerId] === st ? ' on' : '') + '" data-plan="' + p.id + '" data-rsvp="' + st + '">' + RSVP_LABEL[st] + '</button>';
       }).join('') + '</div>';
     }
-    html += '<div class="acts"><button class="btn small ghost" data-plan-chat="' + p.id + '">Open chat</button><button class="btn small ghost" data-plan-day="' + p.id + '">See the day</button>'
+    html += '<div class="acts"><button class="btn small ghost" data-plan-chat="' + p.id + '">Open chat</button><button class="btn small ghost" data-plan-day="' + p.id + '">See the day</button><button class="btn small ghost" data-plan-ics="' + p.id + '">Add to calendar</button>'
       + (p.creatorId === viewerId ? '<button class="btn small ghost" data-plan-edit="' + p.id + '">Edit</button><button class="btn small danger" data-plan-cancel="' + p.id + '">Cancel plan</button>' : '') + '</div>';
     html += '</div>';
   });
@@ -1826,6 +1890,9 @@ function renderPlans(){
   el.innerHTML = html;
   function planOf(b, attr){ return PLANS.filter(function(x){ return x.id === b.getAttribute(attr); })[0]; }
   el.querySelectorAll('[data-plan-chat]').forEach(function(b){ b.addEventListener('click', function(){ openPlanChat(planOf(b, 'data-plan-chat')); }); });
+  el.querySelectorAll('[data-plan-ics]').forEach(function(b){ b.addEventListener('click', function(){ var pl = planOf(b, 'data-plan-ics'); downloadIcs('plan.ics', [planToCalItem(pl)]); }); });
+  var icsAll = document.getElementById('plans-ics-all');
+  if (icsAll) icsAll.addEventListener('click', function(){ downloadIcs('friend-calendar.ics', myCalendarItems()); });
   el.querySelectorAll('[data-plan-day]').forEach(function(b){ b.addEventListener('click', function(){ var pl = planOf(b, 'data-plan-day'), d = parseDate(pl.date); setViewMonth(d.getFullYear(), d.getMonth()); openDay(pl.date); }); });
   el.querySelectorAll('[data-plan-cancel]').forEach(function(b){ b.addEventListener('click', function(){
     if (b.dataset.sure !== '1') { b.dataset.sure = '1'; b.textContent = 'Tap again to cancel'; return; }     // one extra tap instead of a pop-up
