@@ -231,6 +231,17 @@
   #toast{position:fixed;left:50%;bottom:64px;transform:translateX(-50%);background:var(--ink);color:var(--paper);
     font-size:13px;font-weight:700;padding:9px 16px;border-radius:20px;z-index:9999;max-width:88vw;text-align:center;
     opacity:0;pointer-events:none;transition:opacity 0.2s;}
+  /* The + button, and the bar that replaces it while you pick days. */
+  #fab-add{position:fixed;right:16px;bottom:calc(64px + env(safe-area-inset-bottom,0px));width:56px;height:56px;border-radius:50%;border:none;padding:0;
+    background:var(--ink);color:var(--paper);font:400 34px/1 var(--sans);box-shadow:0 4px 14px rgba(31,42,46,.35);cursor:pointer;z-index:25}
+  #avail-bar{position:fixed;left:0;right:0;bottom:0;background:var(--paper);border-top:2px solid var(--accent);display:none;align-items:center;gap:8px;
+    padding:10px 16px calc(10px + env(safe-area-inset-bottom,0px));z-index:30}
+  #avail-count{flex:1;font-weight:700}
+  body.picking #fab-add, body.picking #disclaimer{display:none}
+  body.picking #avail-bar{display:flex}
+  .day.picked{box-shadow:inset 0 0 0 3px var(--accent);background:var(--accent-bg)}
+  .day.picked .dn{background:var(--accent);color:#fff;border-radius:50%;font-weight:700}
+  .wh.picked, .wcol.picked{background:var(--accent-bg);box-shadow:inset 0 0 0 2px var(--accent)}
   .ta-opt:hover{background:var(--accent-bg)}
   .ta-opt:last-child{border-bottom:none !important}
   @media (max-width:520px){ .day{min-height:60px;padding:5px 3px 3px} #monthlabel{font-size:22px} .day .tag{right:3px;font-size:10px} }
@@ -310,6 +321,8 @@
 <div id="plans"></div>
 
 <div id="disclaimer">Your crew, groups, free time, plans, events and messages all come from ActionSync now.</div>
+<button id="fab-add" aria-label="Add availability" title="Add availability">+</button>
+<div id="avail-bar"><span id="avail-count">Tap the days you&rsquo;re free</span><button class="btn ghost" id="avail-cancel">Cancel</button><button class="btn" id="avail-next" disabled>Next</button></div>
 <div id="toast"></div>
 
 <div class="sheet-bg" id="sheet-bg"><div class="sheet-card" id="sheet-card"></div></div>
@@ -1212,6 +1225,7 @@ function renderCalendar(){
     var cls = 'day';
     if (d.getMonth() !== viewMonth) cls += ' other';
     if (date === TODAY) cls += ' today';
+    if (availIsPicked(date)) cls += ' picked';
     if (an.everyone) cls += ' everyone' + (an.solid ? '' : ' maybe');
 
     var bg = '';
@@ -1235,7 +1249,7 @@ function renderCalendar(){
   var grid = document.getElementById('calgrid');
   grid.innerHTML = html;
   grid.querySelectorAll('.day').forEach(function(c){
-    c.addEventListener('click', function(){ openDay(c.dataset.date); });
+    c.addEventListener('click', function(){ calTap(c.dataset.date); });
   });
 }
 function weekLabel(){
@@ -1255,9 +1269,9 @@ function renderWeek(){
   for (var i = 0; i < 7; i++) {
     var date = addDaysStr(weekStart, i), d = parseDate(date), an = dayAnalysis(date, ids);
     var tag = an.everyone ? (an.solid ? 'all free' : 'all around') : (an.total >= 2 && an.best.size >= 2 ? an.best.size + ' of ' + an.total : '');
-    head += '<button class="wh' + (date === TODAY ? ' today' : '') + (an.everyone ? ' everyone' : '') + '" data-date="' + date + '"><div class="wd">' + DN[i] + '</div><div class="wn">' + d.getDate() + '</div>'
+    head += '<button class="wh' + (date === TODAY ? ' today' : '') + (availIsPicked(date) ? ' picked' : '') + (an.everyone ? ' everyone' : '') + '" data-date="' + date + '"><div class="wd">' + DN[i] + '</div><div class="wn">' + d.getDate() + '</div>'
       + avatarStack(freeList(ids, date)) + (tag ? '<div class="tag">' + tag + '</div>' : '') + '</button>';
-    var col = '<div class="wcol' + (date === TODAY ? ' today' : '') + '" data-date="' + date + '" style="--rows:' + rows + '">';
+    var col = '<div class="wcol' + (date === TODAY ? ' today' : '') + (availIsPicked(date) ? ' picked' : '') + '" data-date="' + date + '" style="--rows:' + rows + '">';
     if (an.total >= 2 && an.best.size >= 2) col += '<div class="wbest" style="top:' + ((an.best.start - HMIN) * 24) + 'px;height:' + ((an.best.end - an.best.start) * 24) + 'px"></div>';
     ids.forEach(function(id, k){
       var pp = personById(id);
@@ -1270,7 +1284,7 @@ function renderWeek(){
   }
   document.getElementById('weekwrap').innerHTML = head + body;
   document.getElementById('weekwrap').querySelectorAll('[data-date]').forEach(function(c){
-    c.addEventListener('click', function(){ openDay(c.dataset.date); });
+    c.addEventListener('click', function(){ calTap(c.dataset.date); });
   });
 }
 function setViewMode(m){
@@ -1571,6 +1585,198 @@ function renderFreeForm(date, editBlock){
     renderDaySheet(); renderCalendar();
   });
 }
+
+/* ---------------- ADD AVAILABILITY: the + button ---------------- */
+// Tap +, tap the days you're free right on the calendar (they highlight as
+// you go), then set the times and who can see each one. "Different times for
+// different groups" turns the single time into several rows, each with its
+// own audience -- e.g. Saturday 9-12 for Family, 1-5 for Friends. Saves the
+// same availability blocks the "Add free time" form on a day does.
+var availMode = null;     // null, or { dates:[YYYY-MM-DD, ...] } while picking days
+var availSlots = null;    // the time rows in the form: [{ start, end, vis, pick:[] }]
+var availMulti = false;   // the "different times for different groups" switch
+
+function availIsPicked(date){ return !!availMode && availMode.dates.indexOf(date) !== -1; }
+function calTap(date){ if (availMode) toggleAvailDay(date); else openDay(date); }
+function startAvail(){
+  availMode = { dates:[] }; availSlots = null; availMulti = false;
+  document.body.classList.add('picking');
+  renderAvailBar(); renderCalendar();
+  showToast('Tap the days you’re free');
+}
+function endAvail(){
+  availMode = null; availSlots = null; availMulti = false;
+  document.body.classList.remove('picking');
+  renderCalendar();
+}
+function toggleAvailDay(date){
+  if (date < TODAY) { showToast('Pick today or a day coming up.'); return; }
+  var i = availMode.dates.indexOf(date);
+  if (i === -1) availMode.dates.push(date); else availMode.dates.splice(i, 1);
+  availMode.dates.sort();
+  renderAvailBar(); renderCalendar();
+}
+function renderAvailBar(){
+  var n = availMode ? availMode.dates.length : 0;
+  document.getElementById('avail-count').textContent = n ? n + (n === 1 ? ' day' : ' days') + ' picked' : 'Tap the days you’re free';
+  document.getElementById('avail-next').disabled = !n;
+}
+function availVisibleTo(vis, pick){
+  if (vis === 'all') return 'all';
+  if (vis === 'pick') return pick.slice();
+  var g = GROUPS.filter(function(x){ return 'g:' + x.id === vis; })[0];
+  return g ? g.memberIds.filter(function(id){ return id !== viewerId; }) : [];   // a snapshot of the group's members right now
+}
+function availSlotHtml(sl, i, multi){
+  var groupOpts = GROUPS.map(function(g){ return '<option value="g:' + g.id + '"' + (sl.vis === 'g:' + g.id ? ' selected' : '') + '>Just ' + esc(g.name) + '</option>'; }).join('');
+  return '<div class="av-slot" data-i="' + i + '" style="border:1.5px solid var(--rule);border-radius:10px;padding:10px 12px;margin-bottom:10px">'
+    + '<div class="row2"><div class="field"><label>From</label><select class="av-start">' + timeOptions(sl.start, HMIN, HMAX - 1) + '</select></div>'
+    + '<div class="field"><label>To</label><select class="av-end">' + timeOptions(sl.end, HMIN + 1, HMAX) + '</select></div></div>'
+    + '<div class="field"><label>Who can see this</label><select class="av-vis"><option value="all"' + (sl.vis === 'all' ? ' selected' : '') + '>All my friends</option>'
+      + groupOpts + '<option value="pick"' + (sl.vis === 'pick' ? ' selected' : '') + '>Pick people…</option></select></div>'
+    + '<div class="av-pick" style="' + (sl.vis === 'pick' ? '' : 'display:none') + ';margin:-4px 0 4px">'
+      + othersOrdered().map(function(x){ return '<label class="check"><input type="checkbox" class="av-who" value="' + x.id + '"' + (sl.pick.indexOf(x.id) !== -1 ? ' checked' : '') + '/><i class="dot" style="background:' + x.color + '"></i>' + esc(x.name) + '</label>'; }).join('')
+    + '</div>'
+    + (multi && i > 0 ? '<button class="btn small danger av-del" data-i="' + i + '">Remove this time</button>' : '') + '</div>';
+}
+// Reads the time rows back out of the form into availSlots, so adding or
+// removing a row (which redraws them) never loses what was already chosen.
+function collectAvailSlots(){
+  document.querySelectorAll('#av-slots .av-slot').forEach(function(el){
+    var sl = availSlots[Number(el.dataset.i)];
+    if (!sl) return;
+    sl.start = Number(el.querySelector('.av-start').value);
+    sl.end = Number(el.querySelector('.av-end').value);
+    sl.vis = el.querySelector('.av-vis').value;
+    sl.pick = Array.from(el.querySelectorAll('.av-who:checked')).map(function(c){ return c.value; });
+  });
+}
+function renderAvailSlots(){
+  var box = document.getElementById('av-slots');
+  var shown = availMulti ? availSlots : availSlots.slice(0, 1);
+  box.innerHTML = shown.map(function(sl, i){ return availSlotHtml(sl, i, availMulti); }).join('');
+  box.querySelectorAll('.av-vis').forEach(function(sel){
+    sel.addEventListener('change', function(){ sel.closest('.av-slot').querySelector('.av-pick').style.display = sel.value === 'pick' ? 'block' : 'none'; });
+  });
+  box.querySelectorAll('.av-del').forEach(function(b){
+    b.addEventListener('click', function(){ collectAvailSlots(); availSlots.splice(Number(b.dataset.i), 1); renderAvailSlots(); });
+  });
+}
+function renderAvailForm(){
+  if (!availSlots) availSlots = [{ start:18, end:21, vis:'all', pick:[] }];
+  var dates = availMode.dates, first = dates[0];
+  var html = '<h4>Add availability</h4>'
+    + '<div style="font-size:13px;color:var(--soft);margin-bottom:8px">' + dates.map(function(d){ return esc(longDate(d)); }).join(' · ')
+      + ' <button class="btn small ghost" id="av-days">Change days</button></div>'
+    + '<label class="check"><input type="checkbox" id="av-multi"' + (availMulti ? ' checked' : '') + '/> Different times for different groups</label>'
+    + '<div id="av-slots" style="margin-top:8px"></div>'
+    + '<button class="btn small ghost" id="av-add-slot" style="' + (availMulti ? '' : 'display:none') + ';margin-bottom:6px">+ Add another time</button>'
+    + '<div class="field" style="margin-top:6px"><label>How available</label><select id="av-level"><option value="free">Available</option><option value="open">Open, if the right person or plan comes up</option></select></div>'
+    + '<label class="check"><input type="checkbox" id="av-remote"/> Remote — phone call, video chat, online game (no location needed)</label>'
+    + '<div id="av-location-fields">'
+    + '<div class="field"><label>Where you’ll be</label><select id="av-where"><option value="">' + esc(tripAreaOn(viewerId, first) || areaOf(viewerId) || 'My area') + (tripAreaOn(viewerId, first) ? ' (trip)' : ' (home)') + '</option>'
+      + '<option value="@other">Somewhere else…</option></select></div>'
+    + '<div id="av-other" style="display:none;position:relative" class="field"><input type="text" id="av-area" maxlength="60" autocomplete="off" placeholder="Town, e.g. Nelson, BC"/>'
+      + '<div id="av-area-box" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:5;background:var(--card);border:1.5px solid var(--rule);border-radius:8px;max-height:220px;overflow-y:auto;box-shadow:0 4px 14px rgba(0,0,0,0.12)"></div>'
+      + '<div id="av-tz-hint" style="font-size:11px;color:var(--soft);margin-top:4px"></div></div>'
+    + '<label class="check"><input type="checkbox" id="av-travel"/> I can travel to meet (nearby towns are fine)</label>'
+    + '</div>'
+    + '<label class="check"><input type="checkbox" id="av-repeat"/> Repeat weekly on these days</label>'
+    + '<div id="av-repeat-until" style="display:none" class="field"><label>Ends</label><select id="av-repeat-weeks">'
+      + '<option value="4">In 4 weeks</option><option value="8">In 8 weeks</option><option value="12" selected>In 12 weeks</option>'
+      + '<option value="26">In 6 months</option><option value="">No end date</option></select></div>'
+    + '<div class="form-error" id="av-error"></div>'
+    + '<button class="btn" id="av-save" style="width:100%">Add availability</button>'
+    + '<button class="btn ghost" id="av-back" style="width:100%;margin-top:6px">Back to the calendar</button>';
+  document.getElementById('sheet-card').innerHTML = html;
+  openSheet();
+  renderAvailSlots();
+
+  function backToDays(){ collectAvailSlots(); closeSheet(); }   // availMode stays on, so the picked days are still highlighted
+  document.getElementById('av-days').addEventListener('click', backToDays);
+  document.getElementById('av-back').addEventListener('click', backToDays);
+  document.getElementById('av-multi').addEventListener('change', function(){
+    collectAvailSlots();
+    availMulti = this.checked;
+    if (availMulti && availSlots.length === 1) {
+      // The point of turning this on is a second row -- start it where the first ends, for a group not already used.
+      var a = availSlots[0], used = [a.vis];
+      var nextGroup = GROUPS.filter(function(g){ return used.indexOf('g:' + g.id) === -1; })[0];
+      var ns = Math.min(a.end, HMAX - 1);
+      availSlots.push({ start:ns, end:Math.min(ns + 2, HMAX), vis:nextGroup ? 'g:' + nextGroup.id : 'all', pick:[] });
+    }
+    document.getElementById('av-add-slot').style.display = availMulti ? '' : 'none';
+    renderAvailSlots();
+  });
+  document.getElementById('av-add-slot').addEventListener('click', function(){
+    collectAvailSlots();
+    var last = availSlots[availSlots.length - 1], ns = Math.min(last.end, HMAX - 1);
+    var used = availSlots.map(function(x){ return x.vis; });
+    var nextGroup = GROUPS.filter(function(g){ return used.indexOf('g:' + g.id) === -1; })[0];
+    availSlots.push({ start:ns, end:Math.min(ns + 2, HMAX), vis:nextGroup ? 'g:' + nextGroup.id : 'all', pick:[] });
+    renderAvailSlots();
+  });
+  document.getElementById('av-where').addEventListener('change', function(){
+    document.getElementById('av-other').style.display = this.value === '@other' ? 'block' : 'none';
+  });
+  document.getElementById('av-remote').addEventListener('change', function(){
+    document.getElementById('av-location-fields').style.display = this.checked ? 'none' : 'block';
+  });
+  // Same live place search as the day form: picking a real place also resolves its own time zone.
+  var tzHint = document.getElementById('av-tz-hint');
+  bindTypeAhead('av-area', 'av-area-box', areaOptions, function(label){
+    document.getElementById('av-area').value = label;
+    var tz = _areaTzByLabel[label];
+    tzHint.textContent = tz ? 'Time zone: ' + tz : 'Couldn’t tell the time zone for this one — defaulting to your home zone.';
+  });
+  document.getElementById('av-area').addEventListener('input', function(){
+    var tz = _areaTzByLabel[this.value.trim()];
+    tzHint.textContent = tz ? 'Time zone: ' + tz : '';
+  });
+  document.getElementById('av-repeat').addEventListener('change', function(){
+    document.getElementById('av-repeat-until').style.display = this.checked ? 'block' : 'none';
+  });
+
+  document.getElementById('av-save').addEventListener('click', function(){
+    collectAvailSlots();
+    var err = document.getElementById('av-error');
+    var slots = availMulti ? availSlots : availSlots.slice(0, 1);
+    var rows = [];
+    for (var i = 0; i < slots.length; i++) {
+      var sl = slots[i], label = slots.length > 1 ? 'Time ' + (i + 1) + ': ' : '';
+      if (sl.end <= sl.start) { err.textContent = label + 'the end has to be after the start.'; return; }
+      if (sl.vis === 'pick' && !sl.pick.length) { err.textContent = label + 'pick at least one person, or choose All my friends.'; return; }
+      var vt = availVisibleTo(sl.vis, sl.pick);
+      if (Array.isArray(vt) && !vt.length) { err.textContent = label + 'nobody else is in that group yet.'; return; }
+      rows.push({ start:sl.start, end:sl.end, visibleTo:vt });
+    }
+    var remote = document.getElementById('av-remote').checked;
+    var where = document.getElementById('av-where').value, areaTxt = document.getElementById('av-area').value.trim();
+    if (!remote && where === '@other' && !areaTxt) { err.textContent = 'Type the town, or choose your usual place.'; return; }
+    var areaTz = (!remote && where === '@other' && areaTxt) ? (_areaTzByLabel[areaTxt] || null) : null;
+    var level = document.getElementById('av-level').value;
+    var travel = !remote && document.getElementById('av-travel').checked;
+    var repeat = document.getElementById('av-repeat').checked;
+    var weeks = repeat ? document.getElementById('av-repeat-weeks').value : '';
+    var viewer = personById(viewerId), made = [];
+    availMode.dates.forEach(function(d){
+      rows.forEach(function(r){
+        made.push({ id:newId('blk'), date:d, start:r.start, end:r.end,
+          repeat: repeat ? 'weekly' : 'none', repeatUntil: (repeat && weeks) ? addDaysStr(d, Number(weeks) * 7) : null,
+          level:level, visibleTo:r.visibleTo,
+          area: (!remote && where === '@other') ? areaTxt : '', travel:travel, remote:remote, tz:areaTz });
+      });
+    });
+    made.forEach(function(b){ viewer.blocks.push(b); });
+    syncBlocksUpsert(made);
+    var nd = availMode.dates.length;
+    endAvail(); closeSheet(); renderAll();
+    showToast('Added ' + made.length + (made.length === 1 ? ' time' : ' times') + ' across ' + nd + (nd === 1 ? ' day' : ' days') + '.');
+  });
+}
+document.getElementById('fab-add').addEventListener('click', startAvail);
+document.getElementById('avail-cancel').addEventListener('click', endAvail);
+document.getElementById('avail-next').addEventListener('click', renderAvailForm);
 
 /* ---------------- SET SOMETHING UP (propose a plan) ---------------- */
 function renderPlanForm(date, start, end, whoIds, openIds, place){
@@ -4725,20 +4931,25 @@ function loadAlertState(sb, myId){
 // this), synced right after -- same pattern as syncMyProfile(). Not
 // debounced: block writes happen one at a time on explicit actions
 // (add, remove, cancel a date), not rapid-fire like taste ratings.
-function syncBlockUpsert(b){
-  if (!(window.AS && AS.auth)) return;
-  var sb = AS.auth.client();
-  if (!sb) return;
-  sb.from('friend_calendar_blocks').upsert({
-    id:b.id, user_id:viewerId, date:b.date, start_hour:b.start, end_hour:b.end,
+function blockRow(b){
+  return { id:b.id, user_id:viewerId, date:b.date, start_hour:b.start, end_hour:b.end,
     repeat:b.repeat || 'none', repeat_until:b.repeatUntil || null,
     level:b.level || 'free', visible_to: b.visibleTo == null ? 'all' : b.visibleTo,
     area:b.area || '', travel:!!b.travel, remote:!!b.remote, tz:b.tz || null,
-    cancelled_dates:b.cancelledDates || [], updated_at:new Date().toISOString()
-  }, { onConflict:'id' }).then(function(r){
-    if (r.error) console.warn('[friend-calendar] block save failed:', r.error.message);
+    cancelled_dates:b.cancelledDates || [], updated_at:new Date().toISOString() };
+}
+// One request for any number of blocks (picking 10 days x 3 times is 30 rows).
+// A failed save is shown, not just logged -- availability that silently
+// never saved used to look identical to availability that had.
+function syncBlocksUpsert(list){
+  if (!list.length || !(window.AS && AS.auth)) return;
+  var sb = AS.auth.client();
+  if (!sb) return;
+  withTimeout(sb.from('friend_calendar_blocks').upsert(list.map(blockRow), { onConflict:'id' }), 10000).then(function(r){
+    if (r.error) { console.warn('[friend-calendar] block save failed:', r.error.message); showToast('Couldn’t save your availability — ' + r.error.message); }
   });
 }
+function syncBlockUpsert(b){ syncBlocksUpsert([b]); }
 function syncBlockDelete(id){
   if (!(window.AS && AS.auth)) return;
   var sb = AS.auth.client();
