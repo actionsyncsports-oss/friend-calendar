@@ -2200,6 +2200,48 @@ function syncThreadState(t, personId){
     if (r.error) console.warn('[friend-calendar] thread state save failed:', r.error.message);
   });
 }
+// A chat you cleared and nobody's written in since drops off your list
+// (opening a new chat with the same people reuses it, via findChat). Group
+// and plan chats are tied to the group/plan itself, so they always stay.
+function isClearedAway(t){
+  var adhoc = t.kind === 'chat' || (t.kind === 'group' && !t.groupId);
+  return adhoc && !!t._clearedAt && !t.messages.length;
+}
+function clearThread(t){
+  if (!window.confirm('Clear this chat? It disappears for you only — everyone else keeps their copy.')) return;
+  var cut = nowIso();
+  t.messages = []; t._clearedAt = cut; t._lastSendError = null;
+  var ids = t._rowIds || [t.id];
+  stopMsgPoll(); openThreadId = null;
+  renderMessagesList(); renderBadges();   // no refresh yet -- it would read the database BEFORE this has saved and bring the chat straight back
+  if (!(window.AS && AS.auth)) return;
+  var sb = AS.auth.client(); if (!sb) return;
+  withTimeout(sb.from('friend_calendar_thread_state').upsert(ids.map(function(id){
+    return { thread_id:id, user_id:viewerId, cleared_at:cut };
+  }), { onConflict:'thread_id,user_id' }), 10000).then(function(r){
+    if (r.error) { console.warn('[friend-calendar] clear failed:', r.error.message); showToast('Couldn’t save that — ' + r.error.message); }
+    refreshThreads().then(function(){ if (openThreadId === null) renderMessagesList(); });
+  });
+}
+function deleteMessage(t, m){
+  var i = t.messages.indexOf(m);
+  if (i === -1) return;
+  t.messages.splice(i, 1); t._selMsg = null;
+  renderThread(t.id);
+  function undo(why){
+    t.messages.splice(Math.min(i, t.messages.length), 0, m);
+    t.messages.sort(function(a, b){ return Date.parse(a.ts) - Date.parse(b.ts); });
+    showToast(why); if (openThreadId === t.id) renderThread(t.id);
+  }
+  if (!(window.AS && AS.auth)) return;
+  var sb = AS.auth.client(); if (!sb) return;
+  // .select() so a delete RLS silently refused (204, zero rows) is
+  // distinguishable from one that worked.
+  withTimeout(sb.from('friend_calendar_messages').delete().eq('id', m.id).select(), 10000).then(function(r){
+    if (r.error) undo('Couldn’t delete — ' + r.error.message);
+    else if (!(r.data || []).length) undo('Couldn’t delete that message.');
+  });
+}
 // Same people = same chat. Opens the existing one instead of making a duplicate.
 function findChat(memberIds){
   var key = memberIds.slice().sort().join(',');
@@ -2364,7 +2406,7 @@ function renderMessages(){
   renderMessagesList();
 }
 function renderMessagesList(){
-  var mine = THREADS.filter(function(t){ return t.memberIds.indexOf(viewerId) !== -1; }).sort(function(a, b){
+  var mine = THREADS.filter(function(t){ return t.memberIds.indexOf(viewerId) !== -1 && !isClearedAway(t); }).sort(function(a, b){
     var la = a.messages.length ? a.messages[a.messages.length-1].ts : '', lb = b.messages.length ? b.messages[b.messages.length-1].ts : '';
     return la < lb ? 1 : la > lb ? -1 : 0;
   });
@@ -2418,9 +2460,10 @@ function pollThread(id){
     var sb = AS.auth.client(); if (!sb) return;
     var t = threadById(id); if (!t) return;
     var since = t.messages.length ? t.messages[t.messages.length - 1].ts : '1970-01-01T00:00:00Z';
-    sb.from('friend_calendar_messages').select('*').eq('thread_id', id).gt('created_at', since).order('created_at', { ascending:true })
+    sb.from('friend_calendar_messages').select('*').in('thread_id', t._rowIds || [id]).gt('created_at', since).order('created_at', { ascending:true })
       .then(function(r){
-        var rows = r.data || [];
+        var have = {}; t.messages.forEach(function(m){ have[m.id] = true; });
+        var rows = (r.data || []).filter(function(row){ return !have[row.id]; });
         if (!rows.length || openThreadId !== id) return;
         rows.forEach(function(row){ t.messages.push(messageFromRow(row)); });
         var inp = document.getElementById('msg-input'), draft = inp ? inp.value : '';
@@ -2441,14 +2484,16 @@ function renderThread(id){
     + '<div class="msgs" id="msgs">' + (t.messages.length ? t.messages.map(function(m){
         if (m.sys) return '<div class="msg sys">' + esc(m.text) + '</div>';
         var mineMsg = m.from === viewerId;
-        return '<div class="msg' + (mineMsg ? ' mine' : '') + '"><div class="who">' + (mineMsg ? '' : esc(personById(m.from).name) + ', ') + fmtTs(m.ts) + '</div><div class="bub">' + esc(m.text) + '</div></div>';
+        return '<div class="msg' + (mineMsg ? ' mine' : '') + '"><div class="who">' + (mineMsg ? '' : esc(personById(m.from).name) + ', ') + fmtTs(m.ts) + '</div><div class="bub"' + (mineMsg && !m._syncing ? ' data-mid="' + m.id + '" style="cursor:pointer"' : '') + '>' + esc(m.text) + '</div>'
+          + (mineMsg && t._selMsg === m.id ? '<div class="who"><button class="btn small danger" data-del-msg="' + m.id + '">Delete this message</button></div>' : '') + '</div>';
       }).join('') : '<div style="color:var(--soft);font-size:14px">Nothing here yet. Say something.</div>') + '</div>'
     + (t._lastSendError ? '<div class="form-error" style="margin-top:6px">Last message failed to send: ' + esc(t._lastSendError) + '</div>' : '')
     + '<div class="composer"><input type="text" id="msg-input" maxlength="600" placeholder="Message" autocomplete="off"/><button class="btn" id="msg-send">Send</button></div>'
     + '<div style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
     + '<button class="btn ghost" id="thread-back">All messages</button>'
     + (plan ? '<button class="btn ghost" id="thread-day">See the day</button>' : '')
-    + '<button class="btn ghost" id="thread-mute">' + (t.muted[viewerId] ? 'Unmute' : 'Mute') + '</button></div>';
+    + '<button class="btn ghost" id="thread-mute">' + (t.muted[viewerId] ? 'Unmute' : 'Mute') + '</button>'
+    + '<button class="btn ghost danger" id="thread-clear">Clear chat</button></div>';
   card.innerHTML = html;
   var box = document.getElementById('msgs'); box.scrollTop = box.scrollHeight;
   function send(){
@@ -2459,6 +2504,21 @@ function renderThread(id){
   document.getElementById('msg-send').addEventListener('click', send);
   document.getElementById('msg-input').addEventListener('keydown', function(e){ if (e.key === 'Enter') { e.preventDefault(); send(); } });
   document.getElementById('thread-back').addEventListener('click', function(){ renderMessages(); renderBadges(); });
+  document.getElementById('thread-clear').addEventListener('click', function(){ clearThread(t); });
+  card.querySelectorAll('[data-mid]').forEach(function(b){
+    b.addEventListener('click', function(){
+      t._selMsg = t._selMsg === b.dataset.mid ? null : b.dataset.mid;
+      var inp = document.getElementById('msg-input'), draft = inp ? inp.value : '';
+      renderThread(id);
+      var inp2 = document.getElementById('msg-input'); if (inp2 && draft) inp2.value = draft;
+    });
+  });
+  card.querySelectorAll('[data-del-msg]').forEach(function(b){
+    b.addEventListener('click', function(){
+      var m = t.messages.filter(function(x){ return x.id === b.dataset.delMsg; })[0];
+      if (m) deleteMessage(t, m);
+    });
+  });
   document.getElementById('thread-mute').addEventListener('click', function(){ t.muted[viewerId] = !t.muted[viewerId]; syncThreadState(t, viewerId); renderThread(id); });
   if (plan) document.getElementById('thread-day').addEventListener('click', function(){ var d = parseDate(plan.date); closeSheet(); setViewMonth(d.getFullYear(), d.getMonth()); openDay(plan.date); });
   renderBadges();
@@ -4310,8 +4370,8 @@ function loadThreads(sb, myId){
       // resolved yet shouldn't vanish just because this refresh's
       // SELECT ran first and raced it -- same protection loadPlans()
       // already has, applied here too.
-      var oldById = {};
-      THREADS.forEach(function(t){ oldById[t.id] = t; });
+      var oldById = {}, oldByRow = {};
+      THREADS.forEach(function(t){ oldById[t.id] = t; (t._rowIds || [t.id]).forEach(function(id){ oldByRow[id] = t; }); });
       var syncedIds = synced.map(function(t){ return t.id; });
       var stillSavingThreads = THREADS.filter(function(t){ return t._syncing && syncedIds.indexOf(t.id) === -1; });
       var all = synced.concat(stillSavingThreads);
@@ -4323,32 +4383,69 @@ function loadThreads(sb, myId){
       ]).then(function(res){
         // Same rule as the threads query above: an error is not "no messages".
         if (res[0].error) { console.warn('[friend-calendar] messages load failed:', res[0].error.message); return; }
-        var msgsByThread = {};
+        var msgsByThread = {}, stateByThread = {};
         (res[0].data || []).forEach(function(row){
           (msgsByThread[row.thread_id] = msgsByThread[row.thread_id] || []).push(messageFromRow(row));
         });
+        (res[1].data || []).forEach(function(row){ stateByThread[row.thread_id] = row; });
         all.forEach(function(t){
-          var old = oldById[t.id];
+          var old = oldById[t.id], st = stateByThread[t.id];
           if (old) { t._lastSendError = old._lastSendError; t._syncing = old._syncing; }
           var fresh = msgsByThread[t.id] || [];
+          // "Clear chat" is per-person: history from before the moment
+          // they cleared it is hidden for them only.
+          // Also honor a clear made on this device that the database hasn't
+          // caught up to yet (or never will, if the save failed) -- a
+          // refresh must not resurrect what was just cleared.
+          var clearedAt = st && st.cleared_at;
+          var prev = oldByRow[t.id];   // may be the merged chat this row was folded into
+          if (prev && prev._clearedAt && (!clearedAt || Date.parse(prev._clearedAt) > Date.parse(clearedAt))) clearedAt = prev._clearedAt;
+          if (clearedAt) {
+            var cut = Date.parse(clearedAt);
+            fresh = fresh.filter(function(m){ return Date.parse(m.ts) > cut; });
+            t._clearedAt = clearedAt;
+          }
           var freshIds = fresh.map(function(m){ return m.id; });
           // Messages still mid-save on the thread this one replaces.
-          var stillSavingMsgs = old ? old.messages.filter(function(m){ return m._syncing && freshIds.indexOf(m.id) === -1; }) : t.messages.filter(function(m){ return m._syncing && freshIds.indexOf(m.id) === -1; });
+          var stillSavingMsgs = (old || t).messages.filter(function(m){ return m._syncing && freshIds.indexOf(m.id) === -1; });
           t.messages = fresh.concat(stillSavingMsgs);
+          if (st) { t.muted[myId] = !!st.muted; t.read[myId] = st.read_until; }
         });
-        THREADS = all;
-        (res[1].data || []).forEach(function(row){
-          var t = threadById(row.thread_id);
-          if (!t) return;
-          t.muted[myId] = !!row.muted;
-          t.read[myId] = row.read_until;
-        });
+        THREADS = mergeDuplicateThreads(all, myId);
       });
     });
 }
+// Every test send used to start a brand-new chat with the same person
+// (chats never loaded, so "is there already one?" always said no), and
+// two people can also create the same chat at the same moment. Chats
+// that are the same set of people -- and aren't tied to a calendar
+// group or a plan, which are already one-per-thing -- are shown as ONE
+// conversation: oldest row wins as the one new messages go to, so every
+// member's app picks the same one with no coordination needed.
+function mergeDuplicateThreads(list, myId){
+  var sorted = list.slice().sort(function(a, b){
+    var x = (a.createdAt || '') + '|' + a.id, y = (b.createdAt || '') + '|' + b.id;
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
+  var byKey = {}, out = [];
+  sorted.forEach(function(t){
+    t._rowIds = [t.id];
+    if (t._syncing || t.kind === 'plan' || t.groupId || t.planId) { out.push(t); return; }
+    var key = t.memberIds.slice().sort().join(',');
+    var c = byKey[key];
+    if (!c) { byKey[key] = t; out.push(t); return; }
+    c._rowIds.push(t.id);
+    c.messages = c.messages.concat(t.messages).sort(function(a, b){ return Date.parse(a.ts) - Date.parse(b.ts); });
+    if (!c.title && t.title) c.title = t.title;
+    if (t.muted[myId]) c.muted[myId] = true;
+    if ((t.read[myId] || '') > (c.read[myId] || '')) c.read[myId] = t.read[myId];
+    if (t._clearedAt && (!c._clearedAt || Date.parse(t._clearedAt) > Date.parse(c._clearedAt))) c._clearedAt = t._clearedAt;
+  });
+  return out;
+}
 function threadFromRow(row){
   return { id:row.id, kind:row.kind, title:row.title || '', memberIds:(row.member_ids || []).slice(),
-    groupId:row.group_id || undefined, planId:row.plan_id || undefined, messages:[], read:{}, muted:{} };
+    groupId:row.group_id || undefined, planId:row.plan_id || undefined, createdAt:row.created_at || '', messages:[], read:{}, muted:{} };
 }
 function messageFromRow(row){
   return { id:row.id, from:row.from_user_id, text:row.text, ts:row.created_at, sys:!!row.sys };
