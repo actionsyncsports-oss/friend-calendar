@@ -4293,32 +4293,50 @@ function blockFromRow(row){
 // threads (the ones actually synced); any local 'plan' thread already
 // in THREADS this session is preserved, since plans aren't synced yet.
 function loadThreads(sb, myId){
-  return sb.from('friend_calendar_threads').select('*').contains('member_ids', [myId])
+  // member_ids is a jsonb column. supabase-js's .contains(col, [x]) sends
+  // the Postgres-ARRAY literal form ({x}), which PostgREST rejects for
+  // jsonb ("invalid input syntax for type json") -- so this query failed
+  // on every single call, tr.data was null, and THREADS was replaced with
+  // nothing: every chat and message vanished on the next refresh even
+  // when its insert had succeeded. A pre-serialized JSON string is passed
+  // through as-is, which is the form jsonb's @> operator accepts.
+  return sb.from('friend_calendar_threads').select('*').filter('member_ids', 'cs', JSON.stringify([myId]))
     .then(function(tr){
+      // A failed load must never read as "you have no threads" -- keep
+      // what's already on screen and say why, instead of wiping it.
+      if (tr.error) { console.warn('[friend-calendar] threads load failed:', tr.error.message); return; }
       var synced = (tr.data || []).map(threadFromRow);
       // A thread (or a message inside one) whose own insert hasn't
       // resolved yet shouldn't vanish just because this refresh's
       // SELECT ran first and raced it -- same protection loadPlans()
       // already has, applied here too.
+      var oldById = {};
+      THREADS.forEach(function(t){ oldById[t.id] = t; });
       var syncedIds = synced.map(function(t){ return t.id; });
       var stillSavingThreads = THREADS.filter(function(t){ return t._syncing && syncedIds.indexOf(t.id) === -1; });
-      THREADS = synced.concat(stillSavingThreads);
-      var ids = THREADS.map(function(t){ return t.id; });
-      if (!ids.length) return;
+      var all = synced.concat(stillSavingThreads);
+      var ids = all.map(function(t){ return t.id; });
+      if (!ids.length) { THREADS = all; return; }
       return Promise.all([
         sb.from('friend_calendar_messages').select('*').in('thread_id', ids).order('created_at', { ascending:true }),
         sb.from('friend_calendar_thread_state').select('*').eq('user_id', myId).in('thread_id', ids)
       ]).then(function(res){
+        // Same rule as the threads query above: an error is not "no messages".
+        if (res[0].error) { console.warn('[friend-calendar] messages load failed:', res[0].error.message); return; }
         var msgsByThread = {};
         (res[0].data || []).forEach(function(row){
           (msgsByThread[row.thread_id] = msgsByThread[row.thread_id] || []).push(messageFromRow(row));
         });
-        THREADS.forEach(function(t){
+        all.forEach(function(t){
+          var old = oldById[t.id];
+          if (old) { t._lastSendError = old._lastSendError; t._syncing = old._syncing; }
           var fresh = msgsByThread[t.id] || [];
           var freshIds = fresh.map(function(m){ return m.id; });
-          var stillSavingMsgs = t.messages.filter(function(m){ return m._syncing && freshIds.indexOf(m.id) === -1; });
+          // Messages still mid-save on the thread this one replaces.
+          var stillSavingMsgs = old ? old.messages.filter(function(m){ return m._syncing && freshIds.indexOf(m.id) === -1; }) : t.messages.filter(function(m){ return m._syncing && freshIds.indexOf(m.id) === -1; });
           t.messages = fresh.concat(stillSavingMsgs);
         });
+        THREADS = all;
         (res[1].data || []).forEach(function(row){
           var t = threadById(row.thread_id);
           if (!t) return;
