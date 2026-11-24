@@ -8,6 +8,14 @@
 <meta property="og:type" content="website"/>
 <meta property="og:title" content="Friend Calendar"/>
 <meta property="og:description" content="See when your friends are free, and plan something together."/>
+<!-- Installable app: manifest + icons + a pass-through service worker (sw.js caches nothing). -->
+<link rel="manifest" href="/manifest.webmanifest"/>
+<meta name="theme-color" content="#f3f5f3"/>
+<link rel="icon" type="image/png" href="/icons/icon-192.png"/>
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-title" content="Friend Cal"/>
 <!-- A link shared from "My QR"/"Add by link" carries ?from=<name>; middleware.js
      swaps these three tags for a personalized "<name> is inviting you..." before
      a messaging app's link-preview crawler ever sees this file -- crawlers don't
@@ -276,6 +284,7 @@
   <button class="btn" id="playdates-btn">Playdates</button>
   <button class="btn" id="profile-btn">My profile</button>
   <button class="btn ghost" id="actionsync-sync-btn">ActionSync sync (later)</button>
+  <button class="btn ghost" id="install-btn" style="display:none">Install app</button>
   <button class="btn ghost" id="signout-btn">Sign out</button>
 </div>
 
@@ -2091,6 +2100,32 @@ document.getElementById('actionsync-sync-btn').addEventListener('click', functio
 // individually -- a fresh load re-runs the exact same boot path a signed-out
 // visitor already gets (AS.auth.ready() -> no session -> auth gate), so
 // there's no separate "reset" logic to keep in sync with that path.
+/* ---------------- INSTALL AS AN APP ---------------- */
+// Chrome/Edge/Android fire beforeinstallprompt once the site qualifies; iPhone
+// has no such event (Safari only installs via Share > Add to Home Screen), so
+// there the button explains that instead. Hidden once it's already running as
+// the installed app.
+var _installEvt = null;
+function isStandalone(){ return (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone === true; }
+function isIos(){ return /iphone|ipad|ipod/i.test(navigator.userAgent) && !window.MSStream; }
+function syncInstallBtn(){
+  var b = document.getElementById('install-btn');
+  b.style.display = (!isStandalone() && (_installEvt || isIos())) ? '' : 'none';
+}
+window.addEventListener('beforeinstallprompt', function(e){ e.preventDefault(); _installEvt = e; syncInstallBtn(); });
+window.addEventListener('appinstalled', function(){ _installEvt = null; syncInstallBtn(); showToast('Installed — look for Friend Cal on your home screen.'); });
+document.getElementById('install-btn').addEventListener('click', function(){
+  if (_installEvt) { _installEvt.prompt(); _installEvt.userChoice.then(function(){ _installEvt = null; syncInstallBtn(); }); return; }
+  var card = document.getElementById('sheet-card');
+  card.innerHTML = '<h4>Add to your home screen</h4>'
+    + '<div style="font-size:14px;line-height:1.6;margin-bottom:10px">On iPhone: tap the <b>Share</b> button in Safari (the square with the arrow), scroll down, then tap <b>Add to Home Screen</b>.</div>'
+    + '<button class="btn" id="inst-ok" style="width:100%">Got it</button>';
+  openSheet();
+  document.getElementById('inst-ok').addEventListener('click', closeSheet);
+});
+syncInstallBtn();
+if ('serviceWorker' in navigator) window.addEventListener('load', function(){ navigator.serviceWorker.register('/sw.js').catch(function(e){ console.warn('[friend-calendar] sw register failed:', e && e.message); }); });
+
 document.getElementById('signout-btn').addEventListener('click', function(){
   AS.auth.signOut().then(function(){ location.reload(); });
 });
