@@ -949,8 +949,10 @@ function canSee(b, ownerId, viewer){
 // null = "wildcard": the person said they can travel, is offering something remote
 // (a call, an online game -- nobody needs to be anywhere), or keeps their area
 // private from this viewer, so we don't rule them out by place (and we say so).
+// "In person or remote" counts too: if no one's near them they can always
+// take it online, so place can't rule them out either.
 function blockPlace(b, ownerId, date, viewer){
-  if (b.travel || b.remote) return null;
+  if (b.travel || b.remote || b.remoteAlso) return null;
   if (ownerId !== viewer && !canSeeArea(ownerId, viewer)) return null;
   var label = b.area || tripAreaOn(ownerId, date) || areaOf(ownerId);
   return label ? { key:townOf(label), label:label } : null;
@@ -1006,19 +1008,23 @@ function hourStates(personId, date, viewer){ return hourDetail(personId, date, v
 // "Rossland, BC" or "Trail, BC / Rossland, BC" or "can travel", for labelling someone's day.
 function placeLabelFor(personId, date, viewer){
   viewer = viewer || viewerId;
-  var seen = {}, out = [], trav = false, rem = false;
+  var seen = {}, out = [], trav = false, rem = false, alsoRem = false;
   blocksOnViewerDate(personId, date, viewer).forEach(function(x){
     var b = x.block, pl = blockPlace(b, personId, x.ownerDate, viewer);
     if (b.remote) { rem = true; return; }                            // no location at all -- nothing to show a base for
-    if (b.travel) {                                                  // still show where they're based, if they share it
-      trav = true;
+    if (b.travel || b.remoteAlso) {                                  // still show where they're based, if they share it
+      if (b.travel) trav = true;
+      if (b.remoteAlso) alsoRem = true;
       var base = (personId !== viewer && !canSeeArea(personId, viewer)) ? '' : (b.area || tripAreaOn(personId, x.ownerDate) || areaOf(personId));
       pl = base ? { key:townOf(base), label:base } : null;
     }
     if (pl && !seen[pl.key]) { seen[pl.key] = 1; out.push(pl.label); }
   });
-  return out.join(' / ') + (trav ? (out.length ? ', ' : '') + 'can travel' : '')
-    + (rem ? (out.length || trav ? ', ' : '') + 'remote' : '');
+  var tail = [];
+  if (trav) tail.push('can travel');
+  if (alsoRem) tail.push('or remote');
+  if (rem) tail.push('remote');
+  return out.join(' / ') + (tail.length ? (out.length ? ', ' : '') + tail.join(', ') : '');
 }
 // Runs of the same state, for drawing: [{s, e, lvl}]
 function segmentsFor(personId, date, viewer){
@@ -1391,7 +1397,7 @@ function renderDaySheet(){
   html += '<div class="sec">Your free time</div>';
   html += mine.length ? mine.map(function(b){
     return '<div class="blockrow"><span>' + fmtRange(b.start, b.end) + (b.level === 'open' ? ' <b style="font-weight:700">open</b>' : '')
-      + ' <span style="color:var(--soft)">' + audienceLabel(b) + (b.remote ? ', remote' : b.area ? ', in ' + esc(b.area) : '') + (!b.remote && b.travel ? ', can travel' : '') + '</span>'
+      + ' <span style="color:var(--soft)">' + audienceLabel(b) + (b.remote ? ', remote only' : b.area ? ', in ' + esc(b.area) : '') + (!b.remote && b.travel ? ', can travel' : '') + (!b.remote && b.remoteAlso ? ', or remote' : '') + '</span>'
       + (b.repeat === 'weekly' ? ' <span style="color:var(--soft)">every ' + WEEKDAYS[wdMon0(b.date)]
           + (b.repeatUntil ? ' until ' + longDate(b.repeatUntil) : ', no end date') + '</span>' : '') + '</span>'
       + (b.repeat === 'weekly' ? '<button class="btn small" data-cancel-date="' + b.id + '">Not this ' + WEEKDAYS[wdMon0(date)].slice(0, 3) + '</button>' : '')
@@ -1448,6 +1454,15 @@ function renderDaySheet(){
   document.getElementById('ft-btn').addEventListener('click', function(){ renderFreeForm(date); });
   document.getElementById('evday-btn').addEventListener('click', function(){ renderEventForm(date); });
 }
+// "How will you meet?" -- replaces the old single Remote checkbox, which could
+// only say "remote INSTEAD of in person". Now: in person, in person OR
+// remote (fine either way), or remote only (not leaving the house).
+function meetOf(b){ return b && b.remote ? 'remote' : (b && b.remoteAlso ? 'both' : 'in'); }
+function meetFieldHtml(id, cur){
+  function o(v, label){ return '<option value="' + v + '"' + (cur === v ? ' selected' : '') + '>' + label + '</option>'; }
+  return '<div class="field"><label>How will you meet?</label><select id="' + id + '">'
+    + o('in', 'In person') + o('both', 'In person or remote') + o('remote', 'Remote only — I’m not leaving the house') + '</select></div>';
+}
 // editBlock, when given, switches this into "edit" mode: one existing
 // block, pre-filled, saved in place (no multi-day picker -- that only
 // ever made sense for creating several new blocks at once).
@@ -1476,7 +1491,7 @@ function renderFreeForm(date, editBlock){
     + '<div class="field"><label>How available</label><select id="blk-level"><option value="free">Available</option><option value="open">Open, if the right person or plan comes up</option></select></div>'
     + '<div class="row2"><div class="field"><label>From</label><select id="blk-start">' + timeOptions(editBlock ? editBlock.start : 18, HMIN, HMAX - 1) + '</select></div>'
     + '<div class="field"><label>To</label><select id="blk-end">' + timeOptions(editBlock ? editBlock.end : 21, HMIN + 1, HMAX) + '</select></div></div>'
-    + '<label class="check"><input type="checkbox" id="blk-remote"' + (editBlock && editBlock.remote ? ' checked' : '') + '/> Remote — phone call, video chat, online game (no location needed)</label>'
+    + meetFieldHtml('blk-meet', meetOf(editBlock))
     + '<div id="blk-location-fields">'
     + '<div class="field"><label>Where you’ll be</label><select id="blk-where"><option value="">' + esc(tripAreaOn(viewerId, date) || areaOf(viewerId) || 'My area') + (tripAreaOn(viewerId, date) ? ' (trip)' : ' (home)') + '</option>'
       + '<option value="@other">Somewhere else…</option></select></div>'
@@ -1523,8 +1538,8 @@ function renderFreeForm(date, editBlock){
     var tz = _areaTzByLabel[this.value.trim()];
     blkTzHint.textContent = tz ? 'Time zone: ' + tz : '';
   });
-  document.getElementById('blk-remote').addEventListener('change', function(){
-    document.getElementById('blk-location-fields').style.display = this.checked ? 'none' : 'block';
+  document.getElementById('blk-meet').addEventListener('change', function(){
+    document.getElementById('blk-location-fields').style.display = this.value === 'remote' ? 'none' : 'block';
   });
   if (editBlock && editBlock.remote) document.getElementById('blk-location-fields').style.display = 'none';
   document.getElementById('blk-vis').addEventListener('change', function(){
@@ -1547,7 +1562,7 @@ function renderFreeForm(date, editBlock){
       visibleTo = Array.from(document.querySelectorAll('.blk-who:checked')).map(function(cb){ return cb.value; });
       if (!visibleTo.length) { err.textContent = 'Pick at least one person, or choose All my friends.'; return; }
     }
-    var remote = document.getElementById('blk-remote').checked;
+    var meet = document.getElementById('blk-meet').value, remote = meet === 'remote', remoteAlso = meet === 'both';
     var where = document.getElementById('blk-where').value, areaTxt = document.getElementById('blk-area').value.trim();
     if (!remote && where === '@other' && !areaTxt) { err.textContent = 'Type the town, or choose your usual place.'; return; }
     // Only set when areaTxt was actually picked from the live search
@@ -1563,6 +1578,7 @@ function renderFreeForm(date, editBlock){
       editBlock.area = (!remote && where === '@other') ? areaTxt : '';
       editBlock.travel = !remote && document.getElementById('blk-travel').checked;
       editBlock.remote = remote;
+      editBlock.remoteAlso = remoteAlso;
       editBlock.tz = areaTz;
       syncBlockUpsert(editBlock);
       renderDaySheet(); renderCalendar();
@@ -1576,7 +1592,7 @@ function renderFreeForm(date, editBlock){
         level: document.getElementById('blk-level').value, visibleTo: visibleTo,
         area: (!remote && where === '@other') ? areaTxt : '',
         travel: !remote && document.getElementById('blk-travel').checked,
-        remote: remote,
+        remote: remote, remoteAlso: remoteAlso,
         tz: areaTz
       };
       viewer.blocks.push(blk);
@@ -1672,7 +1688,7 @@ function renderAvailForm(){
     + '<div id="av-slots" style="margin-top:8px"></div>'
     + '<button class="btn small ghost" id="av-add-slot" style="' + (availMulti ? '' : 'display:none') + ';margin-bottom:6px">+ Add another time</button>'
     + '<div class="field" style="margin-top:6px"><label>How available</label><select id="av-level"><option value="free">Available</option><option value="open">Open, if the right person or plan comes up</option></select></div>'
-    + '<label class="check"><input type="checkbox" id="av-remote"/> Remote — phone call, video chat, online game (no location needed)</label>'
+    + meetFieldHtml('av-meet', 'in')
     + '<div id="av-location-fields">'
     + '<div class="field"><label>Where you’ll be</label><select id="av-where"><option value="">' + esc(tripAreaOn(viewerId, first) || areaOf(viewerId) || 'My area') + (tripAreaOn(viewerId, first) ? ' (trip)' : ' (home)') + '</option>'
       + '<option value="@other">Somewhere else…</option></select></div>'
@@ -1719,8 +1735,8 @@ function renderAvailForm(){
   document.getElementById('av-where').addEventListener('change', function(){
     document.getElementById('av-other').style.display = this.value === '@other' ? 'block' : 'none';
   });
-  document.getElementById('av-remote').addEventListener('change', function(){
-    document.getElementById('av-location-fields').style.display = this.checked ? 'none' : 'block';
+  document.getElementById('av-meet').addEventListener('change', function(){
+    document.getElementById('av-location-fields').style.display = this.value === 'remote' ? 'none' : 'block';
   });
   // Same live place search as the day form: picking a real place also resolves its own time zone.
   var tzHint = document.getElementById('av-tz-hint');
@@ -1750,7 +1766,7 @@ function renderAvailForm(){
       if (Array.isArray(vt) && !vt.length) { err.textContent = label + 'nobody else is in that group yet.'; return; }
       rows.push({ start:sl.start, end:sl.end, visibleTo:vt });
     }
-    var remote = document.getElementById('av-remote').checked;
+    var meet = document.getElementById('av-meet').value, remote = meet === 'remote', remoteAlso = meet === 'both';
     var where = document.getElementById('av-where').value, areaTxt = document.getElementById('av-area').value.trim();
     if (!remote && where === '@other' && !areaTxt) { err.textContent = 'Type the town, or choose your usual place.'; return; }
     var areaTz = (!remote && where === '@other' && areaTxt) ? (_areaTzByLabel[areaTxt] || null) : null;
@@ -1764,7 +1780,7 @@ function renderAvailForm(){
         made.push({ id:newId('blk'), date:d, start:r.start, end:r.end,
           repeat: repeat ? 'weekly' : 'none', repeatUntil: (repeat && weeks) ? addDaysStr(d, Number(weeks) * 7) : null,
           level:level, visibleTo:r.visibleTo,
-          area: (!remote && where === '@other') ? areaTxt : '', travel:travel, remote:remote, tz:areaTz });
+          area: (!remote && where === '@other') ? areaTxt : '', travel:travel, remote:remote, remoteAlso:remoteAlso, tz:areaTz });
       });
     });
     made.forEach(function(b){ viewer.blocks.push(b); });
@@ -4654,6 +4670,7 @@ function blockFromRow(row){
     repeat:row.repeat || 'none', repeatUntil:row.repeat_until || null,
     level:row.level || 'free', visibleTo: row.visible_to == null ? 'all' : row.visible_to,
     area:row.area || '', travel:!!row.travel, remote:!!row.remote, tz:row.tz || null,
+    remoteAlso:!!row.remote_also, _raKnown:('remote_also' in row),
     cancelledDates: row.cancelled_dates || [] };
 }
 // Threads/messages were purely in-memory before this -- a message never
@@ -4932,11 +4949,16 @@ function loadAlertState(sb, myId){
 // debounced: block writes happen one at a time on explicit actions
 // (add, remove, cancel a date), not rapid-fire like taste ratings.
 function blockRow(b){
-  return { id:b.id, user_id:viewerId, date:b.date, start_hour:b.start, end_hour:b.end,
+  var row = { id:b.id, user_id:viewerId, date:b.date, start_hour:b.start, end_hour:b.end,
     repeat:b.repeat || 'none', repeat_until:b.repeatUntil || null,
     level:b.level || 'free', visible_to: b.visibleTo == null ? 'all' : b.visibleTo,
     area:b.area || '', travel:!!b.travel, remote:!!b.remote, tz:b.tz || null,
     cancelled_dates:b.cancelledDates || [], updated_at:new Date().toISOString() };
+  // remote_also is a newer column: only send it when it's actually set (or
+  // was already known to exist on this row), so saving ordinary
+  // availability never depends on that column having been added yet.
+  if (b.remoteAlso || b._raKnown) row.remote_also = !!b.remoteAlso;
+  return row;
 }
 // One request for any number of blocks (picking 10 days x 3 times is 30 rows).
 // A failed save is shown, not just logged -- availability that silently
