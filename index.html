@@ -245,6 +245,7 @@
   .rhgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px}
   .rhgrid label{font-size:11px;color:var(--soft);display:block;margin:0}
   .rhgrid select{width:100%;margin-top:2px;font:500 14px var(--sans);padding:6px 3px;border:1.5px solid var(--rule);border-radius:8px;background:var(--paper);color:var(--ink)}
+  .field input[type=date]{width:100%;padding:7px 2px;border:none;border-bottom:1.5px solid var(--rule);background:transparent;border-radius:0;font:500 15px var(--sans);color:var(--ink)}
   .rvrow{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:13px;color:var(--soft)}
   .rvrow input[type=date]{flex:1;min-width:0;font:500 14px var(--sans);padding:6px 6px;border:1.5px solid var(--rule);border-radius:8px;background:var(--card);color:var(--ink)}
   .rvrow select{font:500 14px var(--sans);padding:6px 3px;border:1.5px solid var(--rule);border-radius:8px;background:var(--card);color:var(--ink)}
@@ -1097,12 +1098,17 @@ function blocksOnViewerDate(personId, date, viewer){
   // person's own home zone happens to match the viewer's -- so widen
   // whenever EITHER that's not true OR any block might carry its own
   // zone, rather than deciding once from the person's home zone alone.
-  var hasBlockTz = p.blocks.some(function(b){ return !!b.tz; });
+  var hasBlockTz = p.blocks.some(function(b){ return !!b.tz; }) || tripsOf(personId).some(function(t){ return !!t.tz; });
   var ownerDates = (sameZone && !hasBlockTz) ? [date] : [addDaysStr(date, -1), date, addDaysStr(date, 1)];
   ownerDates.forEach(function(oDate){
     p.blocks.forEach(function(b){
       if (!blockApplies(b, oDate) || !canSee(b, personId, viewer)) return;
-      var bTz = b.tz || ownerTz, bSameZone = bTz === viewerTz;
+      var bTz = b.tz || tripTzFor(personId, oDate, b) || ownerTz, bSameZone = bTz === viewerTz;
+      // The three owner-dates are only scanned so a DIFFERENT-zone block can land on this day.
+      // A block already in the viewer's zone has no day shift, so it only counts on its own date --
+      // without this, a same-zone block on the day before/after leaked onto `date` whenever the
+      // person had any block (or trip) in another zone.
+      if (bSameZone && oDate !== date) return;
       var win = bSameZone ? { start:b.start, end:b.end } : convertWindowToViewerDay(oDate, b.start, b.end, bTz, viewerTz, date);
       if (win.end <= HMIN || win.start >= HMAX) return;   // converted window misses `date`'s displayed grid entirely
       out.push({ block:b, ownerDate:oDate, win:win });
@@ -3736,7 +3742,28 @@ document.getElementById('notif-btn').addEventListener('click', function(){ rende
 function areaOf(id){ return personById(id).area || ''; }
 // Trips: dates when someone is in another town. Every block they offer on those dates is in that town unless the block says otherwise.
 function tripsOf(id){ var p = personById(id); if (!p.trips) p.trips = []; return p.trips; }
+// Trips are saved in friend_calendar_profiles.trips (so friends can see where you'll be) and, as a
+// fallback until that column exists, on this device. Old/odd entries are dropped on the way in.
+function cleanTrips(list){
+  return (Array.isArray(list) ? list : []).filter(function(t){
+    return t && typeof t.area === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(t.start) && /^\d{4}-\d{2}-\d{2}$/.test(t.end);
+  }).map(function(t){ return { id:t.id || newId('trip'), area:t.area, start:t.start, end:t.end, tz:t.tz || null }; });
+}
+function saveTrips(){
+  var me = personById(viewerId); if (!me) return;
+  try { localStorage.setItem('fc_trips_' + viewerId, JSON.stringify(tripsOf(viewerId))); } catch (e) {}
+  syncMyProfile();
+}
 function tripAreaOn(id, date){ var t = tripsOf(id).filter(function(x){ return x.start <= date && date <= x.end; })[0]; return t ? t.area : ''; }
+// Free time offered while away is wall-clock in the town they're in. Only applies to a block that
+// isn't explicitly somewhere else, and only when the trip's town was picked from the real-place list
+// (that's what supplies a zone) -- otherwise it falls back to their home zone as before.
+function tripTzFor(id, date, b){
+  var t = tripsOf(id).filter(function(x){ return x.start <= date && date <= x.end; })[0];
+  if (!t || !t.tz) return '';
+  if (b && b.area && townOf(b.area) !== townOf(t.area)) return '';
+  return t.tz;
+}
 function canSeeArea(owner, viewer){ return owner === viewer || personById(owner).shareArea !== false; }
 function townOf(a){ return String(a || '').split(',')[0].trim().toLowerCase(); }
 var searchArea = null;                                            // null = use my own area
@@ -5055,25 +5082,41 @@ function renderAreaTab(card, me, tabs){
     + (tripsOf(me.id).length ? tripsOf(me.id).slice().sort(function(a, b){ return a.start < b.start ? -1 : 1; }).map(function(t){
         return '<div class="blockrow"><span>' + esc(t.area) + ', ' + esc(t.start) + ' to ' + esc(t.end) + '</span><button class="btn small danger" data-trip-del="' + t.id + '">Remove</button></div>';
       }).join('') : '<div style="font-size:13px;color:var(--soft)">No trips added.</div>')
-    + '<div class="row2" style="margin-top:8px"><div class="field"><label>Town</label><input type="text" id="trip-area" maxlength="60" placeholder="e.g. Vancouver, BC"/></div></div>'
-    + '<div class="row2"><div class="field"><label>From (YYYY-MM-DD)</label><input type="text" id="trip-start" maxlength="10" value="' + esc(TODAY) + '"/></div>'
-    + '<div class="field"><label>To (YYYY-MM-DD)</label><input type="text" id="trip-end" maxlength="10" value="' + esc(addDaysStr(TODAY, 3)) + '"/></div></div>'
+    + '<div class="field" style="position:relative;margin-top:8px"><label>Where to (town or city)</label><input type="text" id="trip-area" maxlength="80" autocomplete="off" placeholder="Start typing a town…"/>'
+      + '<div id="trip-area-box" style="display:none;position:absolute;left:0;right:0;top:100%;z-index:5;background:var(--card);border:1.5px solid var(--rule);border-radius:8px;max-height:220px;overflow-y:auto;box-shadow:0 4px 14px rgba(0,0,0,0.12)"></div></div>'
+    + '<div style="font-size:11px;color:var(--soft);margin:-4px 0 8px">Pick a real place from the list as you type. That also sets the right time zone for your free time there, and lets friends in that town find you.</div>'
+    + '<div class="row2"><div class="field"><label>From</label><input type="date" id="trip-start" value="' + esc(TODAY) + '"/></div>'
+    + '<div class="field"><label>To</label><input type="date" id="trip-end" value="' + esc(addDaysStr(TODAY, 3)) + '"/></div></div>'
     + '<div class="form-error" id="trip-error"></div><button class="btn small" id="trip-add">Add trip</button>'
     + '<div style="font-size:13px;color:var(--soft);margin:6px 0">It sets where local suggestions search by default. A town name only, never an address. If you keep it private, friends can’t pick it as a search area.</div>'
     + '<button class="btn" id="taste-done" style="width:100%;margin-top:12px">Done</button>';
   bindTypeAhead('area-me', 'area-me-box', areaOptions, function(label){ document.getElementById('area-me').value = label; });
   bindTypeAhead('area-tz', 'area-tz-box', timezoneOptions, function(z){ document.getElementById('area-tz').value = z; });
+  bindTypeAhead('trip-area', 'trip-area-box', areaOptions, function(label){ document.getElementById('trip-area').value = label; });
   card.querySelectorAll('[data-pcat]').forEach(function(b){ b.addEventListener('click', function(){ commitArea(); profileCat = b.dataset.pcat; profileQuery = ''; renderProfile(); }); });
-  card.querySelectorAll('[data-trip-del]').forEach(function(b){ b.addEventListener('click', function(){ commitArea(); me.trips = tripsOf(me.id).filter(function(t){ return t.id !== b.dataset.tripDel; }); renderProfile(); }); });
+  card.querySelectorAll('[data-trip-del]').forEach(function(b){ b.addEventListener('click', function(){ commitArea(); me.trips = tripsOf(me.id).filter(function(t){ return t.id !== b.dataset.tripDel; }); saveTrips(); renderProfile(); }); });
   document.getElementById('trip-add').addEventListener('click', function(){
     commitArea();
     var ar = document.getElementById('trip-area').value.trim(), st = document.getElementById('trip-start').value.trim(), en = document.getElementById('trip-end').value.trim(), err = document.getElementById('trip-error');
     var okd = function(x){ return /^\d{4}-\d{2}-\d{2}$/.test(x) && dstrFromDate(parseDate(x)) === x; };
-    if (!ar) { err.textContent = 'Which town?'; return; }
-    if (!okd(st) || !okd(en)) { err.textContent = 'Dates should look like 2026-10-24.'; return; }
+    if (!ar) { err.textContent = 'Which town? Start typing and pick one from the list.'; return; }
+    if (!okd(st) || !okd(en)) { err.textContent = 'Pick the dates the trip starts and ends.'; return; }
     if (en < st) { err.textContent = 'The trip can’t end before it starts.'; return; }
-    tripsOf(me.id).push({ id:newId('trip'), area:ar, start:st, end:en });
-    renderProfile();
+    function save(){
+      tripsOf(me.id).push({ id:newId('trip'), area:ar, start:st, end:en, tz:_areaTzByLabel[ar] || null });
+      saveTrips(); renderProfile();
+    }
+    // A town that wasn't picked from the list won't match what friends have for their own area, and has no
+    // time zone. If the place search can find it, ask them to pick it; if the search finds nothing (or can't
+    // be reached), accept what they typed rather than block them.
+    if (ar in _areaTzByLabel) return save();
+    err.textContent = 'Checking that place…';
+    areaOptions(ar).then(function(opts){
+      if (opts && opts.length) {
+        err.textContent = 'Pick your town from the list so friends there can find you.';
+        var box = document.getElementById('trip-area'); if (box) box.dispatchEvent(new Event('input'));
+      } else save();
+    });
   });
   function commitArea(){
     var newShare = document.getElementById('area-share').checked;
@@ -5468,6 +5511,7 @@ function loadPeopleAndGroups(){
             p.kids = row.kids || [];
             p.timezone = row.timezone || null;
             if ('rhythm' in row) { p._rhythmKnown = true; if (row.rhythm && Array.isArray(row.rhythm.days)) p.rhythm = row.rhythm; }
+            if ('trips' in row) { p._tripsKnown = true; p.trips = cleanTrips(row.trips); }
             p.shareArea = row.share_area !== false;   // missing row (nobody's saved yet) defaults to shared, same as canSeeArea()'s own default
             (row.custom_items || []).forEach(function(c){
               if (!CATALOG.some(function(x){ return x[0] === c[0]; })) CATALOG.push(c);
@@ -5476,6 +5520,13 @@ function loadPeopleAndGroups(){
         });
     })
     .catch(function(e){ console.warn('[friend-calendar] profile data load failed:', e && e.message); })
+    // Until the trips column exists in the database, your own trips live on this device.
+    .then(function(){
+      var me = personById(viewerId);
+      if (me && !me._tripsKnown && !(me.trips && me.trips.length)) {
+        try { me.trips = cleanTrips(JSON.parse(localStorage.getItem('fc_trips_' + viewerId) || '[]')); } catch (e) {}
+      }
+    })
     // Availability blocks were purely in-memory before this -- gone on
     // every refresh. friend_calendar_blocks, same self+crew read as
     // profiles, merged onto the PEOPLE entries' .blocks arrays.
@@ -5847,17 +5898,22 @@ function syncMyProfile(){
     // rhythm is a newer column: only sent once it's set or known to exist, so
     // saving taste/colour never depends on that column having been added.
     ; if (!me._rhythmMissing && (me.rhythm || me._rhythmKnown)) row.rhythm = me.rhythm || null;
-    sb.from('friend_calendar_profiles').upsert(row, { onConflict: 'user_id' }).then(function(r){
-      if (r.error && 'rhythm' in row && /rhythm/i.test(r.error.message || '')) {
-        // The column hasn't been added to the database yet: save everything else, and
-        // keep the rhythm on this device only until it is.
-        me._rhythmMissing = true; delete row.rhythm;
-        return sb.from('friend_calendar_profiles').upsert(row, { onConflict: 'user_id' }).then(function(r2){
-          if (r2.error) console.warn('[friend-calendar] profile save failed:', r2.error.message);
-        });
-      }
-      if (r.error) console.warn('[friend-calendar] profile save failed:', r.error.message);
-    });
+    // trips likewise: a newer column, sent once there's something to send (or it's known to exist).
+    if (!me._tripsMissing && ((me.trips && me.trips.length) || me._tripsKnown)) row.trips = me.trips || [];
+    (function attempt(tries){
+      sb.from('friend_calendar_profiles').upsert(row, { onConflict: 'user_id' }).then(function(r){
+        if (r.error && tries < 2) {
+          // A column that hasn't been added to the database yet must not stop everything else (taste,
+          // colour, area...) from saving: drop just that column, remember it's missing, and retry.
+          var msg = r.error.message || '', dropped = false;
+          ['rhythm', 'trips'].forEach(function(col){
+            if (col in row && new RegExp(col, 'i').test(msg)) { me['_' + col + 'Missing'] = true; delete row[col]; dropped = true; }
+          });
+          if (dropped) return attempt(tries + 1);
+        }
+        if (r.error) console.warn('[friend-calendar] profile save failed:', r.error.message);
+      });
+    })(0);
   }, 600);
 }
 
