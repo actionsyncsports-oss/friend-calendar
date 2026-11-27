@@ -207,6 +207,11 @@
   .wkrow{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--rule)}
   .wkday{font:600 14px var(--sans);color:var(--ink);display:flex;align-items:center;gap:8px;margin:0}
   .wkday input{width:18px;height:18px;accent-color:var(--accent)}
+  .rhcard{border:1.5px solid var(--rule);border-radius:12px;background:var(--card);padding:9px 11px;margin-top:8px}
+  .rhtop{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;font-size:14px}
+  .rhgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px 10px}
+  .rhgrid label{font-size:11px;color:var(--soft);display:block;margin:0}
+  .rhgrid select{width:100%;margin-top:2px;font:500 14px var(--sans);padding:6px 3px;border:1.5px solid var(--rule);border-radius:8px;background:var(--paper);color:var(--ink)}
   .rvrow{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:13px;color:var(--soft)}
   .rvrow input[type=date]{flex:1;min-width:0;font:500 14px var(--sans);padding:6px 6px;border:1.5px solid var(--rule);border-radius:8px;background:var(--card);color:var(--ink)}
   .rvrow select{font:500 14px var(--sans);padding:6px 3px;border:1.5px solid var(--rule);border-radius:8px;background:var(--card);color:var(--ink)}
@@ -959,13 +964,27 @@ function uncancelBlockDate(b, date){
 // longer show as free for something else at the same time.
 function consumeAvailability(personId, date, start, end){
   var p = personById(personId); if (!p) return;
+  var carve = false;
   p.blocks.forEach(function(b){
     if (blockLevel(b) === 0) return;   // a plan never lifts work/busy time
     if (blockApplies(b, date) && b.start < end && b.end > start) {
+      // An auto-availability block spans the whole waking day -- cancelling it
+      // for the date would wipe out the entire day, not just the plan's hours.
+      // So that one is carved with a busy block over just the plan's slot.
+      if (String(b.id).indexOf('auto_') === 0) { carve = true; return; }
       cancelBlockDate(b, date);
       if (personId === viewerId) syncBlockUpsert(b);   // crew's own blocks aren't synced from here -- RLS only allows writing your own, and that's correct: their own session is what should persist their own reaction
     }
   });
+  if (carve) {
+    var s = Math.max(Math.floor(start), HMIN), e = Math.min(Math.ceil(end), HMAX);
+    var dup = p.blocks.some(function(b){ return String(b.id).indexOf('planbusy_') === 0 && b.date === date && b.start === s && b.end === e; });
+    if (e > s && !dup) {
+      var nb = busyBlock('planbusy_', date, s, e);
+      p.blocks.push(nb);
+      if (personId === viewerId) syncBlockUpsert(nb);
+    }
+  }
 }
 // The inverse -- a plan being cancelled, or an RSVP backing off "going",
 // gives that slot back. Only touches a cancellation whose block's own
@@ -973,6 +992,12 @@ function consumeAvailability(personId, date, start, end){
 // restore an unrelated cancellation that happened to land on the same day.
 function restoreAvailability(personId, date, start, end){
   var p = personById(personId); if (!p) return;
+  var s0 = Math.max(Math.floor(start), HMIN), e0 = Math.min(Math.ceil(end), HMAX);
+  var carved = p.blocks.filter(function(b){ return String(b.id).indexOf('planbusy_') === 0 && b.date === date && b.start === s0 && b.end === e0; }).map(function(b){ return b.id; });
+  if (carved.length) {
+    p.blocks = p.blocks.filter(function(b){ return carved.indexOf(b.id) === -1; });
+    if (personId === viewerId) syncBlocksDelete(carved);
+  }
   p.blocks.forEach(function(b){
     if (blockLevel(b) === 0) return;
     if (isCancelledOn(b, date) && b.start < end && b.end > start) {
@@ -1444,7 +1469,7 @@ function renderDaySheet(){
 
   // --- the viewer's own blocks for this day, and a way to add one ---
   var mine = viewer.blocks.filter(function(b){ return blockLevel(b) !== 0 && blockApplies(b, date); });
-  var busyMine = viewer.blocks.filter(function(b){ return blockLevel(b) === 0 && blockRecurs(b, date); });
+  var busyMine = viewer.blocks.filter(function(b){ return blockLevel(b) === 0 && String(b.id).indexOf('planbusy_') !== 0 && blockRecurs(b, date); });
   // Recurs here but was pulled out of just this one date -- a plan
   // consuming it, or a manual "not available this [day]" (something
   // off-app came up). Shown separately so it reads as "still here,
@@ -1471,7 +1496,7 @@ function renderDaySheet(){
     html += '<div class="sec">Busy (work &amp; appointments)</div>' + busyMine.map(function(b){
       var off = isCancelledOn(b, date);
       return '<div class="blockrow"' + (off ? ' style="opacity:0.6"' : '') + '><span>' + fmtRange(b.start, b.end)
-        + ' <span style="color:var(--soft)">' + (off ? 'off this day' : 'closed out') + (b.repeat === 'weekly' ? ', every ' + WEEKDAYS[wdMon0(b.date)] : '') + '</span></span>'
+        + ' <span style="color:var(--soft)">' + (off ? 'off this day' : busyKind(b)) + (b.repeat === 'weekly' ? ', every ' + WEEKDAYS[wdMon0(b.date)] : '') + '</span></span>'
         + (b.repeat === 'weekly' ? '<button class="btn small" data-busy-toggle="' + b.id + '">' + (off ? 'Busy again' : 'Not this ' + WEEKDAYS[wdMon0(date)].slice(0, 3)) + '</button>' : '')
         + '<button class="btn small danger" data-del="' + b.id + '">' + (b.repeat === 'weekly' ? 'Remove series' : 'Remove') + '</button></div>';
     }).join('');
@@ -1488,7 +1513,7 @@ function renderDaySheet(){
   card.querySelectorAll('[data-busy-toggle]').forEach(function(b){
     b.addEventListener('click', function(){
       var blk = viewer.blocks.filter(function(x){ return x.id === b.dataset.busyToggle; })[0];
-      if (blk) { if (isCancelledOn(blk, date)) uncancelBlockDate(blk, date); else cancelBlockDate(blk, date); syncBlockUpsert(blk); }
+      if (blk) { if (isCancelledOn(blk, date)) uncancelBlockDate(blk, date); else cancelBlockDate(blk, date); syncBlockUpsert(blk); if (String(blk.id).indexOf('work_') === 0) refreshBuffers(); }
       renderDaySheet(); renderCalendar();
     });
   });
@@ -1503,6 +1528,7 @@ function renderDaySheet(){
     b.addEventListener('click', function(){
       viewer.blocks = viewer.blocks.filter(function(x){ return x.id !== b.dataset.del; });
       syncBlockDelete(b.dataset.del);
+      if (String(b.dataset.del).indexOf('work_') === 0) refreshBuffers();
       renderDaySheet(); renderCalendar();
     });
   });
@@ -2229,6 +2255,10 @@ function renderPlans(){
 // free time that overlaps (see hourDetail). Friends see you as not free then,
 // never why. Ids carry a prefix so a re-import/re-save can replace just its
 // own earlier blocks: work_wk_ = typed weekly hours, work_im_ = imported.
+function busyKind(b){
+  var id = String(b.id);
+  return id.indexOf('work_') === 0 ? 'work' : id.indexOf('sleep_') === 0 ? 'asleep' : id.indexOf('buf_') === 0 ? 'travel / getting ready' : 'closed out';
+}
 function busyBlocks(prefix){
   var me = personById(viewerId);
   return me ? me.blocks.filter(function(b){ return blockLevel(b) === 0 && (!prefix || String(b.id).indexOf(prefix) === 0); }) : [];
@@ -2255,6 +2285,85 @@ function busyBlock(prefix, date, s, e, weeklyUntil){
   return { id:newId(prefix), date:date, start:s, end:e, repeat:weeklyUntil === undefined ? 'none' : 'weekly',
     repeatUntil:weeklyUntil || null, level:'busy', visibleTo:'all', area:'', travel:false, remote:false, remoteAlso:false, cancelledDates:[] };
 }
+
+// ---- daily rhythm: wake / bed times, buffers around work, auto-availability ----
+// Everything is built from blocks that already exist, so no schema change:
+//   sleep_  busy, weekly: before you get up / after your bedtime
+//   auto_   free, weekly: wake -> bed (work + sleep + buffers carve it down)
+//   buf_    busy: "before work" / "after work" time (travel, getting ready, a shower)
+// The settings themselves (me.rhythm) are remembered on this device and, once the
+// one-line rhythm column exists, in friend_calendar_profiles so they follow you.
+function defaultRhythm(){
+  var days = []; for (var i = 0; i < 7; i++) days.push({ wake:7, bed:23, before:0, after:1, off:false });
+  return { days:days, level:'free', vis:'all' };
+}
+function getRhythm(){
+  var me = personById(viewerId);
+  if (me && me.rhythm && Array.isArray(me.rhythm.days) && me.rhythm.days.length === 7) return me.rhythm;
+  try { var j = JSON.parse(localStorage.getItem('fc_rhythm_' + viewerId) || 'null'); if (j && Array.isArray(j.days) && j.days.length === 7) return j; } catch (e) {}
+  return null;
+}
+function rhythmApplied(){ return busyBlocks('sleep_').length > 0 || personById(viewerId).blocks.some(function(b){ return String(b.id).indexOf('auto_') === 0; }); }
+function removeByPrefix(prefix){
+  var me = personById(viewerId), gone = me.blocks.filter(function(b){ return String(b.id).indexOf(prefix) === 0; }).map(function(b){ return b.id; });
+  me.blocks = me.blocks.filter(function(b){ return gone.indexOf(b.id) === -1; });
+  syncBlocksDelete(gone);
+  return gone.length;
+}
+function nextWeekdayDate(d){ return addDaysStr(TODAY, (d - wdMon0(TODAY) + 7) % 7); }
+// Travel/getting-ready time that follows each work block (same weekday settings).
+function rebuildBuffers(r){
+  var me = personById(viewerId); if (!me || !r) return;
+  removeByPrefix('buf_');
+  var made = [];
+  me.blocks.filter(function(b){ return blockLevel(b) === 0 && String(b.id).indexOf('work_') === 0; }).forEach(function(b){
+    var cfg = r.days[wdMon0(b.date)]; if (!cfg) return;
+    var until = b.repeat === 'weekly' ? (b.repeatUntil || '') : undefined;
+    function add(s, e){
+      if (e <= s) return;
+      var nb = busyBlock('buf_', b.date, s, e, until);
+      nb.cancelledDates = (b.cancelledDates || []).slice();   // a day off work is a day off its buffers too
+      made.push(nb);
+    }
+    if (cfg.after > 0) add(b.end, Math.min(b.end + cfg.after, HMAX));
+    if (cfg.before > 0) add(Math.max(b.start - cfg.before, HMIN), b.start);
+  });
+  if (made.length) addBusy(made);
+}
+function applyRhythm(r){
+  var me = personById(viewerId); if (!me) return;
+  me.rhythm = r; me._rhythmKnown = true;
+  try { localStorage.setItem('fc_rhythm_' + viewerId, JSON.stringify(r)); } catch (e) {}
+  syncMyProfile();
+  removeByPrefix('sleep_'); removeByPrefix('auto_');
+  var visibleTo = 'all';
+  if (r.vis && r.vis !== 'all') {
+    var g = GROUPS.filter(function(x){ return x.id === r.vis; })[0];
+    if (g) visibleTo = g.memberIds.filter(function(id){ return id !== viewerId; });
+  }
+  var made = [];
+  for (var d = 0; d < 7; d++) {
+    var c = r.days[d], first = nextWeekdayDate(d);
+    if (c.wake > HMIN) made.push(busyBlock('sleep_', first, HMIN, c.wake, ''));
+    if (c.bed < HMAX) made.push(busyBlock('sleep_', first, c.bed, HMAX, ''));
+    if (!c.off && c.bed > c.wake) {
+      var fb = busyBlock('auto_', first, Math.max(c.wake, HMIN), Math.min(c.bed, HMAX), '');
+      fb.level = r.level === 'open' ? 'open' : 'free'; fb.visibleTo = visibleTo;
+      made.push(fb);
+    }
+  }
+  if (made.length) addBusy(made);
+  rebuildBuffers(r);
+}
+// After work hours change: keep the buffers in step if a rhythm is set up,
+// otherwise prompt for one.
+var _rhythmPrompt = false;
+function afterWork(tab){
+  var r = getRhythm();
+  if (r && rhythmApplied()) { rebuildBuffers(r); renderAll(); renderWork(tab); }
+  else { renderAll(); _rhythmPrompt = true; renderWork('rhythm'); }
+}
+function refreshBuffers(){ var r = getRhythm(); if (r && rhythmApplied()) rebuildBuffers(r); }
 
 // ---- file parsing ----
 function utcToWall(ms, tz){
@@ -2378,6 +2487,43 @@ function parseCsvBusy(text){
   return { items:out, skippedAllDay:0, skippedFree:0, skippedOther:skipped };
 }
 
+function bindRhythm(card){
+  function readDay(el){
+    return { wake:+el.querySelector('.rh-wake').value, bed:+el.querySelector('.rh-bed').value,
+      before:+el.querySelector('.rh-before').value, after:+el.querySelector('.rh-after').value, off:el.querySelector('.rh-off').checked };
+  }
+  document.getElementById('rh-copy').addEventListener('click', function(){
+    var first = card.querySelector('.rhcard[data-d="0"]'), v = readDay(first);
+    card.querySelectorAll('.rhcard').forEach(function(el){
+      el.querySelector('.rh-wake').value = v.wake; el.querySelector('.rh-bed').value = v.bed;
+      el.querySelector('.rh-before').value = v.before; el.querySelector('.rh-after').value = v.after; el.querySelector('.rh-off').checked = v.off;
+    });
+    showToast('Copied Monday to every day');
+  });
+  document.getElementById('rh-save').addEventListener('click', function(){
+    var err = document.getElementById('rh-error'), days = [];
+    err.textContent = '';
+    for (var i = 0; i < 7; i++) {
+      var d = readDay(card.querySelector('.rhcard[data-d="' + i + '"]'));
+      if (!d.off && d.bed <= d.wake) { err.textContent = WEEKDAYS[i] + ': bed time has to be after you get up (or tick “not available”).'; return; }
+      days.push(d);
+    }
+    var vis = document.getElementById('rh-vis').value;
+    applyRhythm({ days:days, level:document.getElementById('rh-level').value, vis:vis === 'all' ? 'all' : vis.slice(2) });
+    showToast('Availability filled in around your work and sleep');
+    renderAll(); renderWork('rhythm');
+  });
+  var off = document.getElementById('rh-off');
+  if (off) off.addEventListener('click', function(){
+    if (!window.confirm('Remove the automatic availability, sleep and travel times? Your work hours and anything you added by hand stay.')) return;
+    removeByPrefix('sleep_'); removeByPrefix('auto_'); removeByPrefix('buf_'); removeByPrefix('planbusy_');
+    var me = personById(viewerId); me.rhythm = null;
+    try { localStorage.removeItem('fc_rhythm_' + viewerId); } catch (e) {}
+    syncMyProfile();
+    renderAll(); renderWork('rhythm');
+  });
+}
+
 // ---- photo / by-hand entry ----
 // Photo reading costs money per photo (needs ANTHROPIC_API_KEY on the server --
 // see api/read-schedule.js). Off until that's deliberately switched on; the
@@ -2490,7 +2636,7 @@ function bindWorkPhoto(card){
     addBusy(good.map(function(r){ return busyBlock('work_ph_', r.date, r.start, r.end); }));
     _workReview = null;
     showToast(good.length + ' time' + (good.length === 1 ? '' : 's') + ' closed out of your free time');
-    renderAll(); renderWork('photo');
+    afterWork('photo');
   });
 }
 
@@ -2499,11 +2645,12 @@ var _workImport = null;
 function renderWork(tab){
   tab = tab || 'weekly';
   var card = document.getElementById('sheet-card');
-  var nBusy = busyBlocks('').length;
+  var nBusy = busyBlocks('work_').length;
   var tabs = '<div class="chips-row"><button class="chip' + (tab === 'weekly' ? ' on' : '') + '" data-wtab="weekly">Weekly hours</button>'
     + '<button class="chip' + (tab === 'photo' ? ' on' : '') + '" data-wtab="photo">' + (PHOTO_READING ? 'Photo / by hand' : 'By hand') + '</button>'
-    + '<button class="chip' + (tab === 'import' ? ' on' : '') + '" data-wtab="import">Import a file</button></div>';
-  var h = '<h4>Work &amp; busy times</h4>'
+    + '<button class="chip' + (tab === 'import' ? ' on' : '') + '" data-wtab="import">Import a file</button>'
+    + '<button class="chip' + (tab === 'rhythm' ? ' on' : '') + '" data-wtab="rhythm">Day rhythm</button></div>';
+  var h ='<h4>Work &amp; busy times</h4>'
     + '<div style="font-size:13px;color:var(--soft);margin-bottom:10px">Anything you add here is taken out of your free time, so friends only see you as free when you really are. They see that you’re not free then — never why.</div>' + tabs;
   if (tab === 'weekly') {
     var existing = {};
@@ -2518,6 +2665,28 @@ function renderWork(tab){
     h += '<div class="field" style="margin-top:10px"><label>How long?</label><select id="wk-len"><option value="0">Until I change it</option><option value="4">Next 4 weeks</option><option value="8">Next 8 weeks</option><option value="12">Next 12 weeks</option></select></div>'
       + '<div class="form-error" id="wk-error"></div>'
       + '<button class="btn" id="wk-save" style="width:100%">Save work hours</button>';
+  } else if (tab === 'rhythm') {
+    var rr = getRhythm() || defaultRhythm(), applied = rhythmApplied();
+    var ho = function(from, to, sel, last, lastLabel){ var o = ''; for (var x = from; x <= to; x++) o += '<option value="' + x + '"' + (x === sel ? ' selected' : '') + '>' + (x === last ? lastLabel : (x === from && from === HMIN ? hourLabel(x) + ' or earlier' : hourLabel(x))) + '</option>'; return o; };
+    var bo = function(sel){ var o = ''; for (var x = 0; x <= 4; x++) o += '<option value="' + x + '"' + (x === sel ? ' selected' : '') + '>' + (x === 0 ? 'none' : x + ' hr') + '</option>'; return o; };
+    if (_rhythmPrompt) h += '<div style="font-size:13px;background:var(--larch-bg);border-radius:8px;padding:9px 11px;margin:8px 0"><b>Work hours saved.</b> Now fill in your availability around them: tell me when you get up, when you go to bed, and how long you need around work. Anything left over counts as free.</div>';
+    h += '<div style="font-size:13px;color:var(--soft);margin:6px 0 8px">Set when your day starts and ends. Your free time is then filled in automatically — everything between those times that isn’t work. <b>Before / after work</b> is time you’re not available around a shift: travel, getting ready, a shower. Change any day.</div>'
+      + '<button class="btn small ghost" id="rh-copy">Copy Monday to every day</button>';
+    for (var di = 0; di < 7; di++) {
+      var c = rr.days[di];
+      h += '<div class="rhcard" data-d="' + di + '"><div class="rhtop"><b>' + WEEKDAYS[di] + '</b><label class="check" style="margin:0;font-size:12px"><input type="checkbox" class="rh-off"' + (c.off ? ' checked' : '') + '/> not available this day</label></div>'
+        + '<div class="rhgrid"><label>Up at<select class="rh-wake">' + ho(HMIN, 16, c.wake) + '</select></label>'
+        + '<label>Bed at<select class="rh-bed">' + ho(16, HMAX, c.bed, HMAX, 'midnight or later') + '</select></label>'
+        + '<label>Before work<select class="rh-before">' + bo(c.before) + '</select></label>'
+        + '<label>After work<select class="rh-after">' + bo(c.after) + '</select></label></div></div>';
+    }
+    h += '<div class="field" style="margin-top:12px"><label>Who sees this free time</label><select id="rh-vis"><option value="all">All my friends</option>'
+      + GROUPS.map(function(g){ return '<option value="g_' + g.id + '"' + (rr.vis === g.id ? ' selected' : '') + '>Just ' + esc(g.name) + '</option>'; }).join('') + '</select></div>'
+      + '<div class="field"><label>Show it as</label><select id="rh-level"><option value="free"' + (rr.level !== 'open' ? ' selected' : '') + '>Free</option><option value="open"' + (rr.level === 'open' ? ' selected' : '') + '>Open — around if something’s on</option></select></div>'
+      + '<div class="form-error" id="rh-error"></div>'
+      + '<button class="btn" id="rh-save" style="width:100%">' + (applied ? 'Update my availability' : 'Fill in my availability') + '</button>'
+      + '<div style="font-size:12px;color:var(--soft);margin-top:6px">Repeats every week and follows your work hours. Free time you added by hand stays as it is.</div>'
+      + (applied ? '<button class="btn ghost danger" id="rh-off" style="width:100%;margin-top:6px">Turn off auto availability</button>' : '');
   } else if (tab === 'photo') {
     if (!_workReview && !PHOTO_READING) _workReview = { rows:[{ date:TODAY, start:9, end:17 }], unsure:'', fromPhoto:false };
     if (!_workReview) {
@@ -2561,10 +2730,11 @@ function renderWork(tab){
   document.getElementById('wk-done').addEventListener('click', function(){ _workImport = null; _workReview = null; closeSheet(); renderAll(); });
   card.querySelectorAll('[data-wtab]').forEach(function(b){ b.addEventListener('click', function(){ _workImport = null; _workReview = null; renderWork(b.dataset.wtab); }); });
   if (tab === 'photo') bindWorkPhoto(card);
+  if (tab === 'rhythm') { _rhythmPrompt = false; bindRhythm(card); }
   var clr = document.getElementById('wk-clear');
   if (clr) clr.addEventListener('click', function(){
     if (!window.confirm('Remove all ' + nBusy + ' work & busy times? Your free time goes back to how you set it.')) return;
-    removeBusy(''); _workImport = null; renderAll(); renderWork(tab);
+    removeBusy('work_'); refreshBuffers(); _workImport = null; renderAll(); renderWork(tab);
   });
   if (tab === 'weekly') document.getElementById('wk-save').addEventListener('click', function(){
     var err = document.getElementById('wk-error'), made = [], weeks = +document.getElementById('wk-len').value;
@@ -2581,7 +2751,7 @@ function renderWork(tab){
     removeBusy('work_wk_');
     if (made.length) addBusy(made);
     showToast(made.length ? 'Work hours saved — those times are closed out' : 'Work hours cleared');
-    renderAll(); renderWork('weekly');
+    afterWork('weekly');
   });
   var file = document.getElementById('wk-file');
   if (file) file.addEventListener('change', function(){
@@ -2610,7 +2780,7 @@ function renderWork(tab){
     if (made.length > 600) made = made.slice(0, 600);
     addBusy(made); _workImport = null;
     showToast(made.length + ' times closed out of your free time');
-    renderAll(); renderWork('import');
+    afterWork('import');
   });
 }
 document.getElementById('work-btn').addEventListener('click', function(){ _workImport = null; renderWork('weekly'); });
@@ -5244,6 +5414,7 @@ function loadPeopleAndGroups(){
             p.avoids = row.avoids || {};
             p.kids = row.kids || [];
             p.timezone = row.timezone || null;
+            if ('rhythm' in row) { p._rhythmKnown = true; if (row.rhythm && Array.isArray(row.rhythm.days)) p.rhythm = row.rhythm; }
             p.shareArea = row.share_area !== false;   // missing row (nobody's saved yet) defaults to shared, same as canSeeArea()'s own default
             (row.custom_items || []).forEach(function(c){
               if (!CATALOG.some(function(x){ return x[0] === c[0]; })) CATALOG.push(c);
@@ -5614,12 +5785,24 @@ function syncMyProfile(){
     if (!(window.AS && AS.auth)) return;
     var sb = AS.auth.client(), me = personById(viewerId);
     if (!sb || !me) return;
-    sb.from('friend_calendar_profiles').upsert({
+    var row = {
       user_id: viewerId, color: me.color, taste: me.taste || {}, avoids: me.avoids || {},
       custom_items: CATALOG.filter(function(c){ return c[0].indexOf('c:') === 0; }),
       share_area: me.shareArea !== false, kids: me.kids || [], timezone: me.timezone || null,
       updated_at: new Date().toISOString()
-    }, { onConflict: 'user_id' }).then(function(r){
+    }
+    // rhythm is a newer column: only sent once it's set or known to exist, so
+    // saving taste/colour never depends on that column having been added.
+    ; if (!me._rhythmMissing && (me.rhythm || me._rhythmKnown)) row.rhythm = me.rhythm || null;
+    sb.from('friend_calendar_profiles').upsert(row, { onConflict: 'user_id' }).then(function(r){
+      if (r.error && 'rhythm' in row && /rhythm/i.test(r.error.message || '')) {
+        // The column hasn't been added to the database yet: save everything else, and
+        // keep the rhythm on this device only until it is.
+        me._rhythmMissing = true; delete row.rhythm;
+        return sb.from('friend_calendar_profiles').upsert(row, { onConflict: 'user_id' }).then(function(r2){
+          if (r2.error) console.warn('[friend-calendar] profile save failed:', r2.error.message);
+        });
+      }
       if (r.error) console.warn('[friend-calendar] profile save failed:', r.error.message);
     });
   }, 600);
