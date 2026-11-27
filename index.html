@@ -1810,6 +1810,17 @@ function renderAvailSlots(){
     b.addEventListener('click', function(){ collectAvailSlots(); availSlots.splice(Number(b.dataset.i), 1); renderAvailSlots(); });
   });
 }
+// A new time row starts on the first group none of the existing rows already covers (its members
+// ticked), or on "All my friends" if every group is already used.
+function nextSlotAudience(){
+  var covered = {};
+  availSlots.forEach(function(sl){ if (sl.vis === 'pick') (sl.pick || []).forEach(function(id){ covered[id] = 1; }); });
+  var g = GROUPS.filter(function(x){
+    var mem = x.memberIds.filter(function(id){ return id !== viewerId; });
+    return mem.length && !mem.every(function(m){ return covered[m]; });
+  })[0];
+  return g ? { vis:'pick', pick:g.memberIds.filter(function(id){ return id !== viewerId; }) } : { vis:'all', pick:[] };
+}
 function renderAvailForm(){
   if (!availSlots) availSlots = [{ start:18, end:21, vis:'all', pick:[] }];
   var dates = availMode.dates, first = dates[0];
@@ -1848,10 +1859,8 @@ function renderAvailForm(){
     availMulti = this.checked;
     if (availMulti && availSlots.length === 1) {
       // The point of turning this on is a second row -- start it where the first ends, for a group not already used.
-      var a = availSlots[0], used = [a.vis];
-      var nextGroup = GROUPS.filter(function(g){ return used.indexOf('g:' + g.id) === -1; })[0];
-      var ns = Math.min(a.end, HMAX - 1);
-      availSlots.push({ start:ns, end:Math.min(ns + 2, HMAX), vis:nextGroup ? 'g:' + nextGroup.id : 'all', pick:[] });
+      var a = availSlots[0], ns = Math.min(a.end, HMAX - 1), aud = nextSlotAudience();
+      availSlots.push({ start:ns, end:Math.min(ns + 2, HMAX), vis:aud.vis, pick:aud.pick });
     }
     document.getElementById('av-add-slot').style.display = availMulti ? '' : 'none';
     renderAvailSlots();
@@ -1859,9 +1868,8 @@ function renderAvailForm(){
   document.getElementById('av-add-slot').addEventListener('click', function(){
     collectAvailSlots();
     var last = availSlots[availSlots.length - 1], ns = Math.min(last.end, HMAX - 1);
-    var used = availSlots.map(function(x){ return x.vis; });
-    var nextGroup = GROUPS.filter(function(g){ return used.indexOf('g:' + g.id) === -1; })[0];
-    availSlots.push({ start:ns, end:Math.min(ns + 2, HMAX), vis:nextGroup ? 'g:' + nextGroup.id : 'all', pick:[] });
+    var aud = nextSlotAudience();
+    availSlots.push({ start:ns, end:Math.min(ns + 2, HMAX), vis:aud.vis, pick:aud.pick });
     renderAvailSlots();
   });
   document.getElementById('av-where').addEventListener('change', function(){
