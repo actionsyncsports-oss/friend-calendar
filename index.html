@@ -534,10 +534,11 @@ function myTimezoneGuess(){
   try { _tzGuess = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (e) { _tzGuess = 'UTC'; }
   return _tzGuess;
 }
+var _dtfCache = {};
 function tzOffsetMinutesAt(tz, utcMs){
   try {
-    var dtf = new Intl.DateTimeFormat('en-US', { timeZone:tz, hourCycle:'h23',
-      year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' });
+    var dtf = _dtfCache[tz] || (_dtfCache[tz] = new Intl.DateTimeFormat('en-US', { timeZone:tz, hourCycle:'h23',
+      year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' }));
     var parts = dtf.formatToParts(new Date(utcMs)).reduce(function(a, x){ a[x.type] = x.value; return a; }, {});
     var asIfUtc = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour === 24 ? 0 : +parts.hour, +parts.minute, +parts.second);
     return (asIfUtc - utcMs) / 60000;
@@ -1037,7 +1038,9 @@ function consumeAvailability(personId, date, start, end){
       // An auto-availability block spans the whole waking day -- cancelling it
       // for the date would wipe out the entire day, not just the plan's hours.
       // So that one is carved with a busy block over just the plan's slot.
-      if (String(b.id).indexOf('auto_') === 0) { carve = true; return; }
+      // (Published windows -- ids like "<user>:<hash>" -- are carved the same way, so a friend's
+      // booked slot takes out just those hours of their window, not the whole window.)
+      if (String(b.id).indexOf('auto_') === 0 || String(b.id).indexOf(':') !== -1) { carve = true; return; }
       cancelBlockDate(b, date);
       if (personId === viewerId) syncBlockUpsert(b);   // crew's own blocks aren't synced from here -- RLS only allows writing your own, and that's correct: their own session is what should persist their own reaction
     }
@@ -2279,6 +2282,7 @@ function busyBlocks(prefix){
 function syncBlocksDelete(ids){
   if (!ids.length || !(window.AS && AS.auth)) return;
   var sb = AS.auth.client(); if (!sb) return;
+  schedulePublish();
   withTimeout(sb.from('friend_calendar_blocks').delete().in('id', ids), 10000).then(function(r){
     if (r.error) console.warn('[friend-calendar] block delete failed:', r.error.message);
   });
@@ -2347,7 +2351,7 @@ function applyRhythm(r){
   var me = personById(viewerId); if (!me) return;
   me.rhythm = r; me._rhythmKnown = true;
   try { localStorage.setItem('fc_rhythm_' + viewerId, JSON.stringify(r)); } catch (e) {}
-  syncMyProfile();
+  syncMyPrivate();
   removeByPrefix('sleep_'); removeByPrefix('auto_');
   var visibleTo = 'all';
   if (Array.isArray(r.vis)) visibleTo = r.vis;
@@ -2534,7 +2538,7 @@ function bindRhythm(card){
     removeByPrefix('sleep_'); removeByPrefix('auto_'); removeByPrefix('buf_'); removeByPrefix('planbusy_');
     var me = personById(viewerId); me.rhythm = null;
     try { localStorage.removeItem('fc_rhythm_' + viewerId); } catch (e) {}
-    syncMyProfile();
+    syncMyPrivate();
     renderAll(); renderWork('rhythm');
   });
 }
@@ -2666,7 +2670,7 @@ function renderWork(tab){
     + '<button class="chip' + (tab === 'import' ? ' on' : '') + '" data-wtab="import">Import a file</button>'
     + '<button class="chip' + (tab === 'rhythm' ? ' on' : '') + '" data-wtab="rhythm">Day rhythm</button></div>';
   var h ='<h4>Work &amp; busy times</h4>'
-    + '<div style="font-size:13px;color:var(--soft);margin-bottom:10px">Anything you add here is taken out of your free time, so friends only see you as free when you really are. They see that you’re not free then — never why.</div>' + tabs;
+    + '<div style="font-size:13px;color:var(--soft);margin-bottom:10px">Anything you add here is taken out of your free time, so friends only see you as free when you really are. Work, sleep and travel times stay private to you — friends only ever get the free time that’s left over.</div>' + tabs;
   if (tab === 'weekly') {
     var existing = {};
     busyBlocks('work_wk_').forEach(function(b){ existing[wdMon0(b.date)] = b; });
@@ -2944,6 +2948,203 @@ new MutationObserver(function(muts){
     (n.matches && n.matches('.vp') ? [n] : Array.prototype.slice.call(n.querySelectorAll ? n.querySelectorAll('.vp') : [])).forEach(vpRefresh);
   }); });
 }).observe(document.body, { childList:true, subtree:true });
+
+/* ---------------- PUBLISHED AVAILABILITY + PRIVATE SETTINGS ---------------- */
+// What friends can see is NOT your raw calendar. Your work hours, sleep, travel time and trips stay
+// private (friend_calendar_blocks / friend_calendar_private are readable only by you). Each time your
+// calendar changes, this works out the free time that's actually LEFT -- on your own device, after
+// subtracting all of that -- and publishes just those windows to friend_calendar_shared. Every
+// published row carries its audience (visible_to) and the database only hands a row to the people it
+// is meant for, so someone you didn't pick gets a blank calendar, not a hidden one.
+var PUBLISH_DAYS = 90;
+var _pubTimer = null, _pubIds = null, _pubBusy = false, _pubAgain = false, _pubMissing = false;
+function hash64(str){
+  var h1 = 0x811c9dc5, h2 = 0x9747b28c;
+  for (var i = 0; i < str.length; i++) {
+    var c = str.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193);
+    h2 = Math.imul(h2 ^ c, 0x85ebca6b); h2 ^= h2 >>> 13;
+  }
+  return (h1 >>> 0).toString(36) + (h2 >>> 0).toString(36);
+}
+// id -> row, for the next PUBLISH_DAYS days. Ids are a hash of the row's content, so an unchanged
+// window keeps the same id and nothing is re-sent for it.
+// The subtraction is done in ABSOLUTE time (UTC), so it is right whatever zone each block was
+// entered in (a block offered while on a trip is in that town's clock). What's left is then written
+// out in YOUR home zone, split at midnight, so a friend's app converts it to their day exactly as it
+// always converted your blocks.
+function publishRows(){
+  var me = personById(viewerId), rows = {};
+  if (!me) return rows;
+  var metaId = 'meta:' + viewerId;   // "this person has published" marker; never shown on any calendar
+  rows[metaId] = { id:metaId, user_id:viewerId, date:'1970-01-01', start_hour:0, end_hour:0, level:'meta', visible_to:'all', area:'', travel:false, remote:false, remote_also:false };
+  var homeTz = tzOf(viewerId), share = me.shareArea !== false, H = 3600000;
+  var firstDay = addDaysStr(TODAY, -1), lastDay = addDaysStr(TODAY, PUBLISH_DAYS + 1), lastRow = addDaysStr(TODAY, PUBLISH_DAYS);
+  var busy = [], frees = [];
+  me.blocks.forEach(function(b){
+    for (var d = firstDay; d <= lastDay; d = addDaysStr(d, 1)) {
+      if (!blockApplies(b, d)) continue;
+      var tz = b.tz || tripTzFor(viewerId, d, b) || homeTz;
+      var s0 = zonedWallClockToUtc(d, b.start, tz), e0 = zonedWallClockToUtc(d, b.end, tz);
+      if (e0 <= s0) continue;
+      var L = blockLevel(b);
+      if (L === 0) busy.push([s0, e0]);   // work / sleep / travel / plans: subtracted, never published
+      else frees.push({ s:s0, e:e0, b:b, od:d, L:L });
+    }
+  });
+  busy.sort(function(x, y){ return x[0] - y[0]; });
+  var merged = [];
+  busy.forEach(function(iv){
+    var last = merged[merged.length - 1];
+    if (last && iv[0] <= last[1]) last[1] = Math.max(last[1], iv[1]); else merged.push([iv[0], iv[1]]);
+  });
+  frees.forEach(function(f){
+    var vt = f.b.visibleTo == null ? 'all' : f.b.visibleTo;
+    if (Array.isArray(vt) && !vt.length) return;   // shared with nobody
+    var aud = vt === 'all' ? 'all' : vt.slice().sort().join(',');
+    var area = share ? (f.b.area || tripAreaOn(viewerId, f.od) || '') : '';   // a trip only ever appears as "where this free time is"
+    var lvl = f.L === 1 ? 'open' : 'free';
+    // what's left of this block once every busy stretch is taken out
+    var pieces = [[f.s, f.e]];
+    merged.forEach(function(m){
+      if (m[1] <= f.s || m[0] >= f.e) return;
+      var nextPieces = [];
+      pieces.forEach(function(pc){
+        if (m[1] <= pc[0] || m[0] >= pc[1]) { nextPieces.push(pc); return; }
+        if (m[0] > pc[0]) nextPieces.push([pc[0], m[0]]);
+        if (m[1] < pc[1]) nextPieces.push([m[1], pc[1]]);
+      });
+      pieces = nextPieces;
+    });
+    pieces.forEach(function(pc){
+      var cur = pc[0], guard = 0;
+      while (cur < pc[1] && guard++ < 4) {
+        var w = utcToWall(cur, homeTz);
+        var segEnd = Math.min(pc[1], zonedWallClockToUtc(addDaysStr(w.date, 1), 0, homeTz));
+        var sh = Math.floor(w.hour), eh = Math.min(24, Math.ceil(w.hour + (segEnd - cur) / H));
+        if (eh > sh && w.date >= TODAY && w.date < lastRow) {
+          var id = viewerId + ':' + hash64([w.date, sh, eh, lvl, aud, area, f.b.travel ? 1 : 0, f.b.remote ? 1 : 0, f.b.remoteAlso ? 1 : 0].join('|'));
+          rows[id] = { id:id, user_id:viewerId, date:w.date, start_hour:sh, end_hour:eh, level:lvl, visible_to:(vt === 'all' ? 'all' : vt.slice()),
+                       area:area, travel:!!f.b.travel, remote:!!f.b.remote, remote_also:!!f.b.remoteAlso };
+        }
+        cur = segEnd;
+      }
+    });
+  });
+  return rows;
+}
+function schedulePublish(){ clearTimeout(_pubTimer); _pubTimer = setTimeout(publishAvailability, 1500); }
+function missingTableError(err, name){
+  return !!err && (err.code === '42P01' || err.code === 'PGRST205' || new RegExp(name + '|schema cache|does not exist', 'i').test(err.message || ''));
+}
+function fetchMyPublishedIds(sb){
+  var ids = {}, page = 0, size = 1000;
+  function next(){
+    return sb.from('friend_calendar_shared').select('id').eq('user_id', viewerId).order('id').range(page * size, page * size + size - 1).then(function(r){
+      if (r.error) throw r.error;
+      (r.data || []).forEach(function(x){ ids[x.id] = 1; });
+      if ((r.data || []).length < size) return ids;
+      page++; return next();
+    });
+  }
+  return next();
+}
+// Only the difference goes over the wire: new windows are inserted, windows that no longer exist
+// (including days that have passed) are deleted.
+function publishAvailability(){
+  if (_pubMissing || !(window.AS && AS.auth) || !viewerId) return Promise.resolve();
+  var sb = AS.auth.client();
+  if (!sb || !personById(viewerId)) return Promise.resolve();
+  if (_pubBusy) { _pubAgain = true; return Promise.resolve(); }
+  _pubBusy = true;
+  var next = publishRows();
+  return Promise.resolve(_pubIds || fetchMyPublishedIds(sb)).then(function(old){
+    var add = [], del = [];
+    Object.keys(next).forEach(function(id){ if (!old[id]) add.push(next[id]); });
+    Object.keys(old).forEach(function(id){ if (!next[id]) del.push(id); });
+    var jobs = [];
+    for (var i = 0; i < del.length; i += 100) jobs.push(sb.from('friend_calendar_shared').delete().in('id', del.slice(i, i + 100)));
+    for (var j = 0; j < add.length; j += 150) jobs.push(sb.from('friend_calendar_shared').upsert(add.slice(j, j + 150), { onConflict:'id' }));
+    return Promise.all(jobs).then(function(res){
+      var bad = res.filter(function(r){ return r && r.error; })[0];
+      if (bad) throw bad.error;
+      var ids = {}; Object.keys(next).forEach(function(id){ ids[id] = 1; });
+      _pubIds = ids;
+    });
+  }).catch(function(e){
+    _pubIds = null;
+    if (missingTableError(e, 'friend_calendar_shared')) _pubMissing = true;   // table not created yet: friends fall back to the old way
+    else console.warn('[friend-calendar] publish failed:', e && e.message);
+  }).then(function(){ _pubBusy = false; if (_pubAgain) { _pubAgain = false; schedulePublish(); } });
+}
+function blockFromSharedRow(row){
+  return { id:row.id, date:row.date, start:row.start_hour, end:row.end_hour, repeat:'none', repeatUntil:null,
+    level:row.level === 'open' ? 'open' : 'free', visibleTo:'all',   // the database already filtered by audience
+    area:row.area || '', travel:!!row.travel, remote:!!row.remote, remoteAlso:!!row.remote_also, tz:null, cancelledDates:[] };
+}
+function fetchShared(sb, ids){
+  var rows = [], page = 0, size = 1000, from = addDaysStr(TODAY, -1);
+  function next(){
+    return sb.from('friend_calendar_shared').select('*').in('user_id', ids).or('date.gte.' + from + ',level.eq.meta')
+      .order('id').range(page * size, page * size + size - 1).then(function(r){
+        if (r.error) return { ok:false };
+        rows = rows.concat(r.data || []);
+        if ((r.data || []).length < size) return { ok:true, rows:rows };
+        page++; return next();
+      });
+  }
+  return next();
+}
+// Your own availability comes from your private rows; everyone else's from what they published.
+// A friend who hasn't opened the new version yet hasn't published, so (until the database is locked
+// down) their old rows are used for them instead -- nobody goes blank during the changeover.
+function loadAvailability(sb, myId){
+  var me = personById(myId), others = PEOPLE.filter(function(p){ return p.id !== myId; }).map(function(p){ return p.id; });
+  var mine = sb.from('friend_calendar_blocks').select('*').eq('user_id', myId).then(function(r){
+    (r.data || []).forEach(function(row){ me.blocks.push(blockFromRow(row)); });
+  });
+  var theirs = others.length ? fetchShared(sb, others) : Promise.resolve({ ok:true, rows:[] });
+  return Promise.all([mine, theirs]).then(function(res){
+    var t = res[1], published = {}, legacy = others;
+    if (t.ok) {
+      t.rows.forEach(function(row){
+        if (row.level === 'meta') { published[row.user_id] = true; return; }
+        var p = personById(row.user_id); if (p) p.blocks.push(blockFromSharedRow(row));
+      });
+      legacy = others.filter(function(id){ return !published[id]; });
+    }
+    if (!legacy.length) return;
+    return sb.from('friend_calendar_blocks').select('*').in('user_id', legacy).then(function(r){
+      (r.data || []).forEach(function(row){ var p = personById(row.user_id); if (p) p.blocks.push(blockFromRow(row)); });
+    });
+  }).then(function(){ publishAvailability(); });
+}
+// Wake/bed settings and trips: private to you (friend_calendar_private). Until that table exists they
+// fall back to the old profile columns / this device, exactly as before.
+var _privTimer = null;
+function syncMyPrivate(){
+  clearTimeout(_privTimer);
+  _privTimer = setTimeout(function(){
+    if (!(window.AS && AS.auth)) return;
+    var sb = AS.auth.client(), me = personById(viewerId);
+    if (!sb || !me) return;
+    if (me._privMissing) { syncMyProfile(); return; }
+    sb.from('friend_calendar_private').upsert({ user_id:viewerId, rhythm:me.rhythm || null, trips:tripsOf(viewerId), updated_at:new Date().toISOString() }, { onConflict:'user_id' }).then(function(r){
+      if (r.error) {
+        if (missingTableError(r.error, 'friend_calendar_private')) { me._privMissing = true; syncMyProfile(); }
+        else console.warn('[friend-calendar] private settings save failed:', r.error.message);
+        return;
+      }
+      me._privKnown = true;
+      // The old copy in the shared profile row was readable by friends -- clear it now the private one is safe.
+      if (me._rhythmKnown || me._tripsKnown) {
+        sb.from('friend_calendar_profiles').update({ rhythm:null, trips:[] }).eq('user_id', viewerId).then(function(r2){
+          if (!r2.error) { me._rhythmKnown = false; me._tripsKnown = false; }
+        });
+      }
+    });
+  }, 600);
+}
 
 /* ---------------- FRIENDS LIST ---------------- */
 // Nicknames are only ever offered for a friend whose profile has no name at
@@ -3865,7 +4066,7 @@ function cleanTrips(list){
 function saveTrips(){
   var me = personById(viewerId); if (!me) return;
   try { localStorage.setItem('fc_trips_' + viewerId, JSON.stringify(tripsOf(viewerId))); } catch (e) {}
-  syncMyProfile();
+  syncMyPrivate(); schedulePublish();
 }
 function tripAreaOn(id, date){ var t = tripsOf(id).filter(function(x){ return x.start <= date && date <= x.end; })[0]; return t ? t.area : ''; }
 // Free time offered while away is wall-clock in the town they're in. Only applies to a block that
@@ -5211,7 +5412,7 @@ function renderAreaTab(card, me, tabs){
     // share_area/timezone have no equivalent in ActionSync's own
     // profiles table -- they live in friend_calendar_profiles alongside
     // taste/avoids/colour.
-    if (shareChanged || tzChanged) syncMyProfile();
+    if (shareChanged || tzChanged) { syncMyProfile(); schedulePublish(); }
     return true;
   }
   document.getElementById('taste-done').addEventListener('click', function(){ if (!commitArea()) return; searchArea = null; closeSheet(); renderAll(); });
@@ -5578,8 +5779,11 @@ function loadPeopleAndGroups(){
             p.avoids = row.avoids || {};
             p.kids = row.kids || [];
             p.timezone = row.timezone || null;
-            if ('rhythm' in row) { p._rhythmKnown = true; if (row.rhythm && Array.isArray(row.rhythm.days)) p.rhythm = row.rhythm; }
-            if ('trips' in row) { p._tripsKnown = true; p.trips = cleanTrips(row.trips); }
+            // Only ever your OWN legacy copy; a friend's wake/bed settings and trips are not yours to read.
+            if (row.user_id === viewerId) {
+              if ('rhythm' in row) { p._rhythmKnown = true; if (row.rhythm && Array.isArray(row.rhythm.days)) p.rhythm = row.rhythm; }
+              if ('trips' in row) { p._tripsKnown = true; p.trips = cleanTrips(row.trips); }
+            }
             p.shareArea = row.share_area !== false;   // missing row (nobody's saved yet) defaults to shared, same as canSeeArea()'s own default
             (row.custom_items || []).forEach(function(c){
               if (!CATALOG.some(function(x){ return x[0] === c[0]; })) CATALOG.push(c);
@@ -5588,26 +5792,31 @@ function loadPeopleAndGroups(){
         });
     })
     .catch(function(e){ console.warn('[friend-calendar] profile data load failed:', e && e.message); })
-    // Until the trips column exists in the database, your own trips live on this device.
+    // Your wake/bed settings and trips: private table first, then the old profile copy / this device.
+    .then(function(){
+      var me = personById(user.id);
+      return sb.from('friend_calendar_private').select('*').eq('user_id', user.id).maybeSingle().then(function(r){
+        if (r.error) { if (missingTableError(r.error, 'friend_calendar_private')) me._privMissing = true; return; }
+        if (r.data) {
+          me._privKnown = true;
+          if (r.data.rhythm && Array.isArray(r.data.rhythm.days)) me.rhythm = r.data.rhythm;
+          if (Array.isArray(r.data.trips)) me.trips = cleanTrips(r.data.trips);
+        }
+      });
+    })
+    .catch(function(e){ console.warn('[friend-calendar] private settings load failed:', e && e.message); })
     .then(function(){
       var me = personById(viewerId);
-      if (me && !me._tripsKnown && !(me.trips && me.trips.length)) {
+      if (me && !me._privKnown && !me._tripsKnown && !(me.trips && me.trips.length)) {
         try { me.trips = cleanTrips(JSON.parse(localStorage.getItem('fc_trips_' + viewerId) || '[]')); } catch (e) {}
       }
+      // Anything that was still in the old shared place moves to the private one now.
+      if (me && !me._privKnown && !me._privMissing && (me.rhythm || tripsOf(me.id).length)) syncMyPrivate();
     })
     // Availability blocks were purely in-memory before this -- gone on
     // every refresh. friend_calendar_blocks, same self+crew read as
     // profiles, merged onto the PEOPLE entries' .blocks arrays.
-    .then(function(){
-      var ids = PEOPLE.map(function(p){ return p.id; });
-      return sb.from('friend_calendar_blocks').select('*').in('user_id', ids)
-        .then(function(br){
-          (br.data || []).forEach(function(row){
-            var p = personById(row.user_id);
-            if (p) p.blocks.push(blockFromRow(row));
-          });
-        });
-    })
+    .then(function(){ return loadAvailability(sb, user.id); })
     .catch(function(e){ console.warn('[friend-calendar] blocks load failed:', e && e.message); })
     .then(function(){ return loadGroups(sb, user.id); })
     .catch(function(e){ console.warn('[friend-calendar] groups load failed:', e && e.message); })
@@ -5931,6 +6140,7 @@ function syncBlocksUpsert(list){
   if (!list.length || !(window.AS && AS.auth)) return;
   var sb = AS.auth.client();
   if (!sb) return;
+  schedulePublish();
   withTimeout(sb.from('friend_calendar_blocks').upsert(list.map(blockRow), { onConflict:'id' }), 10000).then(function(r){
     if (r.error) { console.warn('[friend-calendar] block save failed:', r.error.message); showToast('Couldn’t save your availability — ' + r.error.message); }
   });
@@ -5940,6 +6150,7 @@ function syncBlockDelete(id){
   if (!(window.AS && AS.auth)) return;
   var sb = AS.auth.client();
   if (!sb) return;
+  schedulePublish();
   sb.from('friend_calendar_blocks').delete().eq('id', id).then(function(r){
     if (r.error) console.warn('[friend-calendar] block delete failed:', r.error.message);
   });
@@ -5965,9 +6176,12 @@ function syncMyProfile(){
     }
     // rhythm is a newer column: only sent once it's set or known to exist, so
     // saving taste/colour never depends on that column having been added.
-    ; if (!me._rhythmMissing && (me.rhythm || me._rhythmKnown)) row.rhythm = me.rhythm || null;
-    // trips likewise: a newer column, sent once there's something to send (or it's known to exist).
-    if (!me._tripsMissing && ((me.trips && me.trips.length) || me._tripsKnown)) row.trips = me.trips || [];
+    // These two now live in friend_calendar_private (friends can read the profile row, so they must not
+    // be here). Only if that table doesn't exist yet do they still go to the old columns.
+    ; if (me._privMissing) {
+      if (!me._rhythmMissing && (me.rhythm || me._rhythmKnown)) row.rhythm = me.rhythm || null;
+      if (!me._tripsMissing && ((me.trips && me.trips.length) || me._tripsKnown)) row.trips = me.trips || [];
+    }
     (function attempt(tries){
       sb.from('friend_calendar_profiles').upsert(row, { onConflict: 'user_id' }).then(function(r){
         if (r.error && tries < 2) {
