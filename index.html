@@ -207,6 +207,10 @@
   .wkrow{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--rule)}
   .wkday{font:600 14px var(--sans);color:var(--ink);display:flex;align-items:center;gap:8px;margin:0}
   .wkday input{width:18px;height:18px;accent-color:var(--accent)}
+  .rvrow{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:13px;color:var(--soft)}
+  .rvrow input[type=date]{flex:1;min-width:0;font:500 14px var(--sans);padding:6px 6px;border:1.5px solid var(--rule);border-radius:8px;background:var(--card);color:var(--ink)}
+  .rvrow select{font:500 14px var(--sans);padding:6px 3px;border:1.5px solid var(--rule);border-radius:8px;background:var(--card);color:var(--ink)}
+  .rvday{font-size:11px;color:var(--soft);margin:1px 0 0 4px}
   .wkt{font-size:13px;color:var(--soft);white-space:nowrap}
   .wkt select{font:500 14px var(--sans);padding:5px 4px;border:1.5px solid var(--rule);border-radius:8px;background:var(--card);color:var(--ink)}
   /* Friends list + people pickers */
@@ -2374,6 +2378,118 @@ function parseCsvBusy(text){
   return { items:out, skippedAllDay:0, skippedFree:0, skippedOther:skipped };
 }
 
+// ---- photo / by-hand entry ----
+var _workReview = null;   // { rows:[{date,start,end}], unsure, fromPhoto }
+// Phone photos are huge; handwriting stays legible at ~1800px, and a small
+// JPEG uploads fast on a bad connection.
+function shrinkImage(file, maxSide){
+  return new Promise(function(resolve, reject){
+    var url = URL.createObjectURL(file), img = new Image();
+    img.onload = function(){
+      var k = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight)), c = document.createElement('canvas');
+      c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', 0.85).split(',')[1]);
+    };
+    img.onerror = function(){ URL.revokeObjectURL(url); reject(new Error('decode')); };
+    img.src = url;
+  });
+}
+function readSchedulePhoto(file, name){
+  return shrinkImage(file, 1800).then(function(b64){
+    var sb = AS.auth.client();
+    return sb.auth.getSession().then(function(s){
+      var tok = s && s.data && s.data.session && s.data.session.access_token;
+      if (!tok) throw new Error('signin');
+      return fetch('/api/read-schedule', { method:'POST', headers:{ 'content-type':'application/json', 'authorization':'Bearer ' + tok },
+        body:JSON.stringify({ image:b64, mediaType:'image/jpeg', name:name, today:TODAY }) });
+    });
+  }).then(function(r){
+    return r.json().catch(function(){ return {}; }).then(function(j){ if (!r.ok) { var e = new Error(j.error || ('http ' + r.status)); e.code = j.error; e.status = r.status; throw e; } return j; });
+  });
+}
+function reviewRowsFrom(shifts){
+  var rows = [];
+  shifts.forEach(function(s){
+    var a = String(s.start).split(':'), b = String(s.end).split(':');
+    var st = Math.max(Math.floor(+a[0] + (+a[1] || 0) / 60), HMIN), en = Math.min(Math.ceil(+b[0] + (+b[1] || 0) / 60), HMAX);
+    if (en > st) rows.push({ date:s.date, start:st, end:en });
+  });
+  rows.sort(function(x, y){ return x.date < y.date ? -1 : x.date > y.date ? 1 : x.start - y.start; });
+  return rows;
+}
+function bindWorkPhoto(card){
+  var hand = document.getElementById('ph-hand');
+  if (hand) hand.addEventListener('click', function(){ _workReview = { rows:[{ date:TODAY, start:9, end:17 }], unsure:'', fromPhoto:false }; renderWork('photo'); });
+  var file = document.getElementById('ph-file');
+  if (file) file.addEventListener('change', function(){
+    var f = file.files && file.files[0], msg = document.getElementById('ph-msg');
+    if (!f) return;
+    if (!/^image\//.test(f.type)) { msg.textContent = 'That doesn’t look like a photo.'; return; }
+    msg.style.color = 'var(--soft)'; msg.textContent = 'Reading your schedule… this can take 10–20 seconds.';
+    file.disabled = true;
+    readSchedulePhoto(f, document.getElementById('ph-name').value.trim()).then(function(j){
+      var rows = reviewRowsFrom(j.shifts || []);
+      _workReview = { rows:rows.length ? rows : [{ date:TODAY, start:9, end:17 }], unsure:rows.length ? (j.unsure || '') : (j.unsure || 'I couldn’t find any shifts for you in that photo — add them below, or try a clearer, straighter photo.'), fromPhoto:!!rows.length };
+      renderWork('photo');
+    }).catch(function(e){
+      file.disabled = false; file.value = '';
+      msg.style.color = 'var(--busy)';
+      msg.textContent = e.code === 'not_configured' ? 'Photo reading isn’t switched on yet — use “type my shifts in by hand” for now.'
+        : e.code === 'limit' ? 'That’s a lot of photos for one day — try again tomorrow, or type them in by hand.'
+        : (e.code === 'signin' || e.status === 401) ? 'Please sign out and back in, then try again.'
+        : e.message === 'decode' ? 'I couldn’t open that photo. Try taking it again.'
+        : 'Couldn’t read that one. Try a clearer photo, or type your shifts in by hand.';
+    });
+  });
+  var rows = document.getElementById('rv-rows');
+  if (!rows || !_workReview) return;
+  var rv = _workReview;
+  function hrOpts(sel){ var o = ''; for (var x = HMIN; x <= HMAX; x++) o += '<option value="' + x + '"' + (x === sel ? ' selected' : '') + '>' + hourLabel(x) + '</option>'; return o; }
+  function draw(){
+    rows.innerHTML = rv.rows.map(function(r, i){
+      return '<div class="rvrow" data-i="' + i + '"><input type="date" class="rv-d" value="' + esc(r.date) + '"/>'
+        + '<select class="rv-s">' + hrOpts(r.start) + '</select><span>to</span><select class="rv-e">' + hrOpts(r.end) + '</select>'
+        + '<button class="btn small ghost rv-x" aria-label="Remove this row">✕</button></div>'
+        + '<div class="rvday" data-i="' + i + '">' + (/^\d{4}-\d{2}-\d{2}$/.test(r.date) ? esc(WEEKDAYS[wdMon0(r.date)]) : '') + '</div>';
+    }).join('');
+    rows.querySelectorAll('.rvrow').forEach(function(el){
+      var i = +el.dataset.i;
+      el.querySelector('.rv-d').addEventListener('change', function(){ rv.rows[i].date = this.value; var d = rows.querySelector('.rvday[data-i="' + i + '"]'); if (d) d.textContent = /^\d{4}-\d{2}-\d{2}$/.test(this.value) ? WEEKDAYS[wdMon0(this.value)] : ''; });
+      el.querySelector('.rv-s').addEventListener('change', function(){ rv.rows[i].start = +this.value; });
+      el.querySelector('.rv-e').addEventListener('change', function(){ rv.rows[i].end = +this.value; });
+      el.querySelector('.rv-x').addEventListener('click', function(){ rv.rows.splice(i, 1); draw(); });
+    });
+  }
+  draw();
+  document.getElementById('rv-add').addEventListener('click', function(){
+    var last = rv.rows[rv.rows.length - 1];
+    rv.rows.push({ date:last ? last.date : TODAY, start:last ? Math.min(last.end, HMAX - 1) : 9, end:Math.min((last ? last.end : 9) + 4, HMAX) }); draw();
+  });
+  document.getElementById('rv-restart').addEventListener('click', function(){ _workReview = null; renderWork('photo'); });
+  document.getElementById('rv-save').addEventListener('click', function(){
+    var err = document.getElementById('rv-error'), good = [], seen = {};
+    err.textContent = '';
+    for (var i = 0; i < rv.rows.length; i++) {
+      var r = rv.rows[i];
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(r.date)) { err.textContent = 'Row ' + (i + 1) + ' needs a date.'; return; }
+      if (r.end <= r.start) { err.textContent = 'Row ' + (i + 1) + ': the end has to be after the start (a shift past midnight can end at 12am).'; return; }
+      var k = r.date + '|' + r.start + '|' + r.end; if (!seen[k]) { seen[k] = 1; good.push(r); }
+    }
+    if (!good.length) { err.textContent = 'Add at least one row.'; return; }
+    if (document.getElementById('rv-replace').checked) {
+      var lo = good.reduce(function(m, r){ return r.date < m ? r.date : m; }, good[0].date), hi = good.reduce(function(m, r){ return r.date > m ? r.date : m; }, good[0].date);
+      var me = personById(viewerId), gone = busyBlocks('work_ph_').filter(function(b){ return b.date >= lo && b.date <= hi; }).map(function(b){ return b.id; });
+      me.blocks = me.blocks.filter(function(b){ return gone.indexOf(b.id) === -1; }); syncBlocksDelete(gone);
+    }
+    addBusy(good.map(function(r){ return busyBlock('work_ph_', r.date, r.start, r.end); }));
+    _workReview = null;
+    showToast(good.length + ' time' + (good.length === 1 ? '' : 's') + ' closed out of your free time');
+    renderAll(); renderWork('photo');
+  });
+}
+
 // ---- the sheet ----
 var _workImport = null;
 function renderWork(tab){
@@ -2381,6 +2497,7 @@ function renderWork(tab){
   var card = document.getElementById('sheet-card');
   var nBusy = busyBlocks('').length;
   var tabs = '<div class="chips-row"><button class="chip' + (tab === 'weekly' ? ' on' : '') + '" data-wtab="weekly">Weekly hours</button>'
+    + '<button class="chip' + (tab === 'photo' ? ' on' : '') + '" data-wtab="photo">Photo / by hand</button>'
     + '<button class="chip' + (tab === 'import' ? ' on' : '') + '" data-wtab="import">Import a file</button></div>';
   var h = '<h4>Work &amp; busy times</h4>'
     + '<div style="font-size:13px;color:var(--soft);margin-bottom:10px">Anything you add here is taken out of your free time, so friends only see you as free when you really are. They see that you’re not free then — never why.</div>' + tabs;
@@ -2397,11 +2514,30 @@ function renderWork(tab){
     h += '<div class="field" style="margin-top:10px"><label>How long?</label><select id="wk-len"><option value="0">Until I change it</option><option value="4">Next 4 weeks</option><option value="8">Next 8 weeks</option><option value="12">Next 12 weeks</option></select></div>'
       + '<div class="form-error" id="wk-error"></div>'
       + '<button class="btn" id="wk-save" style="width:100%">Save work hours</button>';
+  } else if (tab === 'photo') {
+    if (!_workReview) {
+      h += '<div style="font-size:13px;color:var(--soft);margin:6px 0 10px">Take a photo of your schedule — handwritten is fine — and it’ll pull out <b>your</b> shifts, split shifts included. You check them before anything is saved.</div>'
+        + '<div class="field"><label>Your name as it’s written on the schedule</label><input type="text" id="ph-name" maxlength="40" value="' + esc((personById(viewerId) || {}).name || '') + '"/></div>'
+        + '<input type="file" id="ph-file" accept="image/*" style="width:100%;margin-bottom:8px"/>'
+        + '<div id="ph-msg" style="font-size:13px;color:var(--soft);min-height:18px"></div>'
+        + '<div style="font-size:12px;color:var(--soft);margin:6px 0 10px">The photo is sent off to be read and isn’t kept.</div>'
+        + '<button class="btn ghost" id="ph-hand" style="width:100%">Or type my shifts in by hand</button>';
+    } else {
+      var rv = _workReview;
+      h += '<div style="font-size:13px;color:var(--soft);margin:6px 0 8px">' + (rv.fromPhoto ? 'Here’s what it read. <b>Check every line</b> — handwriting is easy to misread. Fix, remove or add rows, then save.' : 'Add each stretch you work. A split shift is two rows on the same day.') + '</div>'
+        + (rv.unsure ? '<div style="font-size:12px;background:var(--larch-bg);border-radius:8px;padding:8px 10px;margin-bottom:8px">' + esc(rv.unsure) + '</div>' : '')
+        + '<div id="rv-rows"></div>'
+        + '<button class="btn small ghost" id="rv-add">+ Add a row</button>'
+        + '<label class="check" style="margin-top:8px"><input type="checkbox" id="rv-replace" checked/> Replace times I added this way for these dates</label>'
+        + '<div class="form-error" id="rv-error"></div>'
+        + '<button class="btn" id="rv-save" style="width:100%">Close out these times</button>'
+        + '<button class="btn ghost" id="rv-restart" style="width:100%;margin-top:6px">Start over</button>';
+    }
   } else if (!_workImport) {
     h += '<div style="font-size:13px;color:var(--soft);margin:6px 0 10px">Upload your schedule as a calendar file (<b>.ics</b> — what Google Calendar, Apple Calendar, Outlook and most scheduling apps export) or a simple <b>.csv</b> with a date and start/end time on each line. Everything in it is closed out of your free time.</div>'
       + '<input type="file" id="wk-file" accept=".ics,.csv,.txt,text/calendar,text/csv,text/plain" style="width:100%;margin-bottom:8px"/>'
       + '<div id="wk-msg" style="font-size:13px;color:var(--soft)"></div>'
-      + '<div style="font-size:12px;color:var(--soft);margin-top:10px">A photo or PDF of a schedule can’t be read yet. Export it as a calendar file, or type your hours in the Weekly tab.</div>';
+      + '<div style="font-size:12px;color:var(--soft);margin-top:10px">Have a paper or handwritten schedule? Use the <b>Photo / by hand</b> tab.</div>';
   } else {
     var it = _workImport, days = {}; it.items.forEach(function(x){ days[x.date] = 1; });
     var dates = Object.keys(days).sort();
@@ -2417,8 +2553,9 @@ function renderWork(tab){
   if (nBusy) h += '<button class="btn ghost danger" id="wk-clear" style="width:100%;margin-top:12px">Clear all my work &amp; busy times (' + nBusy + ')</button>';
   h += '<button class="btn ghost" id="wk-done" style="width:100%;margin-top:6px">Done</button>';
   card.innerHTML = h; openSheet();
-  document.getElementById('wk-done').addEventListener('click', function(){ _workImport = null; closeSheet(); renderAll(); });
-  card.querySelectorAll('[data-wtab]').forEach(function(b){ b.addEventListener('click', function(){ _workImport = null; renderWork(b.dataset.wtab); }); });
+  document.getElementById('wk-done').addEventListener('click', function(){ _workImport = null; _workReview = null; closeSheet(); renderAll(); });
+  card.querySelectorAll('[data-wtab]').forEach(function(b){ b.addEventListener('click', function(){ _workImport = null; _workReview = null; renderWork(b.dataset.wtab); }); });
+  if (tab === 'photo') bindWorkPhoto(card);
   var clr = document.getElementById('wk-clear');
   if (clr) clr.addEventListener('click', function(){
     if (!window.confirm('Remove all ' + nBusy + ' work & busy times? Your free time goes back to how you set it.')) return;
