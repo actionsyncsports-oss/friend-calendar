@@ -3459,48 +3459,53 @@ function openGroupShare(g){
     });
   });
 }
-function newInviteToken(){
-  var a = new Uint8Array(18); crypto.getRandomValues(a);
-  return btoa(String.fromCharCode.apply(null, a)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
 function groupLink(g){ return location.origin + location.pathname + '?join=' + g.id + '.' + g.inviteToken; }
-// Owner's screen: the link and QR code to share. "Reset" kills the old link.
+function linkIsLive(g){ return !!(g.inviteToken && g.inviteExpires && new Date(g.inviteExpires).getTime() > Date.now()); }
+// Owner's screen: the link and QR code to share. A link works for 24 hours and for up to 50 people, then it stops;
+// "New link" makes a fresh one (and kills the old). The expiry is enforced by the database, not by this screen.
 function renderGroupInvite(g, justCreated){
   var card = document.getElementById('sheet-card'), sb = AS.auth.client();
+  function bad(msg){
+    card.innerHTML = '<h4>Invite link</h4><div class="form-error">' + esc(msg) + '</div><button class="btn ghost" id="grp-done" style="width:100%;margin-top:10px">Done</button>';
+    document.getElementById('grp-done').addEventListener('click', function(){ closeSheet(); renderAll(); });
+  }
+  function make(){
+    var btn = document.getElementById('grp-make') || document.getElementById('grp-reset'); if (btn) { btn.disabled = true; }
+    sb.rpc('fc_group_new_invite', { gid:g.id }).then(function(r){
+      if (r.error) return bad('Group links need the latest one-time setup in the database first.');
+      if (!r.data || !r.data.ok) return bad((r.data && r.data.error) || 'Couldn’t make a link — try again.');
+      g.inviteToken = r.data.token; g.inviteExpires = r.data.expires_at; draw();
+    });
+  }
   function draw(){
-    var url = g.inviteToken ? groupLink(g) : '';
+    var live = linkIsLive(g), url = live ? groupLink(g) : '';
+    var left = live ? Math.max(1, Math.ceil((new Date(g.inviteExpires).getTime() - Date.now()) / 3600000)) : 0;
+    var until = live ? new Date(g.inviteExpires).toLocaleString([], { weekday:'short', hour:'numeric', minute:'2-digit' }) : '';
     card.innerHTML = '<h4>' + (justCreated ? '“' + esc(g.name) + '” is ready' : 'Invite to “' + esc(g.name) + '”') + '</h4>'
       + '<div style="font-size:13px;color:var(--soft);margin-bottom:8px">Share this link or QR code. Everyone who opens it joins the group, sees who’s in it, and ticks who may see their calendar — nobody has to add each other one by one.</div>'
-      + (url ? '<div id="grp-qr" style="display:flex;justify-content:center;margin:10px 0;background:#fff;border-radius:12px;padding:12px"></div><div class="grplink">' + esc(url) + '</div>'
-              + '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="grp-copy">Copy link</button>' + (navigator.share ? '<button class="btn" id="grp-share">Share…</button>' : '') + '<button class="btn ghost" id="grp-reset">Reset link</button></div>'
-              : '<div class="form-error" id="grp-err">Making the link…</div>')
+      + (live
+        ? '<div style="font-size:12px;color:var(--soft);margin-bottom:4px">Works for ' + left + ' more hour' + (left === 1 ? '' : 's') + ' (until ' + esc(until) + '), and for up to 50 people. Then make a new one.</div>'
+          + '<div id="grp-qr" style="display:flex;justify-content:center;margin:10px 0;background:#fff;border-radius:12px;padding:12px"></div><div class="grplink">' + esc(url) + '</div>'
+          + '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="grp-copy">Copy link</button>' + (navigator.share ? '<button class="btn" id="grp-share">Share…</button>' : '') + '<button class="btn ghost" id="grp-reset">New link</button></div>'
+        : '<div style="font-size:13px;background:var(--larch-bg);border-radius:10px;padding:10px 12px;margin:6px 0 10px">' + (g.inviteToken ? 'The last link has expired.' : 'There’s no invite link yet.')
+          + ' Links last 24 hours so one that gets passed around can’t keep adding people.</div><button class="btn" id="grp-make" style="width:100%">Make a 24-hour link</button>')
       + '<button class="btn ghost" id="grp-done" style="width:100%;margin-top:10px">Done</button>';
     document.getElementById('grp-done').addEventListener('click', function(){ closeSheet(); renderAll(); });
-    if (!url) return;
+    var mk = document.getElementById('grp-make'); if (mk) mk.addEventListener('click', make);
+    if (!live) return;
     if (typeof QRCode !== 'undefined') new QRCode(document.getElementById('grp-qr'), { text:url, width:180, height:180 });
     document.getElementById('grp-copy').addEventListener('click', function(){
       (navigator.clipboard && navigator.clipboard.writeText ? navigator.clipboard.writeText(url) : Promise.reject()).then(function(){ showToast('Link copied'); }, function(){ showToast('Press and hold the link to copy it'); });
     });
     var sh = document.getElementById('grp-share');
-    if (sh) sh.addEventListener('click', function(){ navigator.share({ title:'Join “' + g.name + '” on Friend Calendar', text:'Join “' + g.name + '” on Friend Calendar so we can all see when we’re free:', url:url }).catch(function(){}); });
+    if (sh) sh.addEventListener('click', function(){ navigator.share({ title:'Join “' + g.name + '” on Friend Calendar', text:'Join “' + g.name + '” on Friend Calendar so we can all see when we’re free (this link works for 24 hours):', url:url }).catch(function(){}); });
     document.getElementById('grp-reset').addEventListener('click', function(){
-      if (!window.confirm('Reset the link? The old link and QR code will stop working.')) return;
-      make(true);
+      if (!window.confirm('Make a new link? The current link and QR code will stop working.')) return;
+      make();
     });
   }
-  function make(force){
-    if (g.inviteToken && !force) return draw();
-    var tok = newInviteToken();
-    sb.from('crew_groups').update({ invite_token:tok }).eq('id', g.id).then(function(r){
-      if (r.error) {
-        card.innerHTML = '<h4>Invite link</h4><div class="form-error">Group links need a one-time setup in the database first. (' + esc(r.error.message || '') + ')</div><button class="btn ghost" id="grp-done" style="width:100%;margin-top:10px">Done</button>';
-        document.getElementById('grp-done').addEventListener('click', function(){ closeSheet(); renderAll(); });
-        return;
-      }
-      g.inviteToken = tok; draw();
-    });
-  }
-  openSheet(); draw(); make(false);
+  openSheet(); draw();
+  if (justCreated && !linkIsLive(g)) make();   // a group you just made starts with a fresh link
 }
 // Opening someone's invite link: show what it is, then join on a yes.
 function handleJoinFromLink(){
@@ -3514,7 +3519,13 @@ function handleJoinFromLink(){
   sb.rpc('fc_group_peek', { gid:gid, tok:tok }).then(function(r){
     if (r.error) { showToast('Group invites aren’t switched on yet.'); forget(); return; }
     var d = r.data || {};
-    if (!d.ok) { forget(); showToast(d.error || 'That invite is no longer valid.'); return; }
+    if (!d.ok) {
+      forget();
+      var cd = document.getElementById('sheet-card');
+      cd.innerHTML = '<h4>Can’t join with that link</h4><div style="font-size:14px;margin-bottom:12px">' + esc(d.error || 'That invite is no longer valid.') + '</div><button class="btn" id="join-ok" style="width:100%">OK</button>';
+      openSheet(); document.getElementById('join-ok').addEventListener('click', closeSheet);
+      return;
+    }
     var card = document.getElementById('sheet-card');
     card.innerHTML = '<h4>Join “' + esc(d.name) + '”?</h4>'
       + '<div style="font-size:14px;margin-bottom:6px">' + esc(d.owner) + ' invited you.</div>'
@@ -6137,7 +6148,7 @@ function loadGroups(sb, myId){
           var ids = [g.owner_id].concat(membersByGroup[g.id] || []);
           var seen = {};
           ids = ids.filter(function(id){ return seen[id] ? false : (seen[id] = true); });
-          return { id:g.id, name:g.name, memberIds:ids, ownerId:g.owner_id, inviteToken:g.invite_token || '' };
+          return { id:g.id, name:g.name, memberIds:ids, ownerId:g.owner_id, inviteToken:g.invite_token || '', inviteExpires:g.invite_expires_at || '' };
         });
       });
   });
