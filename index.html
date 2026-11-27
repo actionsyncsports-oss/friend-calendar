@@ -862,8 +862,15 @@ function uploadMyAvatar(dataUrl){
   var sb = AS.auth.client();
   if (!sb) return Promise.resolve({ error:'Not signed in' });
   return fetch(dataUrl).then(function(r){ return r.blob(); }).then(function(blob){
-    var path = viewerId + '/avatar.jpg';
-    return sb.storage.from('avatars').upload(path, blob, { contentType:'image/jpeg', upsert:true })
+    // A NEW file name every time, plain INSERT. The old fixed path + upsert:true
+    // made Storage run INSERT ... ON CONFLICT DO UPDATE, which Postgres only allows
+    // if a SELECT policy exists on storage.objects -- and this bucket deliberately
+    // has none (it's public, reads never needed one). That combination is what
+    // makes "new row violates row-level security policy" on a bucket that is
+    // otherwise set up correctly. A fresh path needs only the INSERT policy.
+    var path = viewerId + '/avatar-' + Date.now().toString(36) + '.jpg';
+    var prev = (personById(viewerId) || {}).photo || '';
+    return sb.storage.from('avatars').upload(path, blob, { contentType:'image/jpeg', upsert:false })
       .then(function(up){
         if (up.error) { console.warn('[friend-calendar] avatar upload failed:', up.error.message); return { error:'storage: ' + up.error.message }; }
         var pub = sb.storage.from('avatars').getPublicUrl(path);
@@ -872,6 +879,9 @@ function uploadMyAvatar(dataUrl){
         url += '?v=' + Date.now();   // path never changes, so bust any cached copy
         return sb.from('profiles').update({ photo_url:url }).eq('id', viewerId).then(function(res){
           if (res.error) { console.warn('[friend-calendar] photo_url save failed:', res.error.message); return { error:'profile: ' + res.error.message }; }
+          // Best-effort tidy-up of the previous picture (needs delete rights; failure is harmless).
+          var m = /\/avatars\/([^?]+)/.exec(prev);
+          if (m) { var old = decodeURIComponent(m[1]); if (old.indexOf(viewerId + '/') === 0 && old !== path) sb.storage.from('avatars').remove([old]).then(function(){}, function(){}); }
           return { url:url };
         });
       });
@@ -887,7 +897,12 @@ function bindPhotoRow(card, redraw){
       setPhoto(viewerId, url); redraw(); renderAll();         // local-first: instant feedback
       uploadMyAvatar(url).then(function(res){
         if (res.url) { setPhoto(viewerId, res.url); if (document.getElementById('sheet-card').contains(card)) { redraw(); renderAll(); } }
-        else showToast('Photo saved on this device — upload failed: ' + (res.error || 'unknown error'));
+        else {
+          // Left on screen (not just a 2-second toast) so the real reason can be read.
+          var why = res.error || 'unknown error', box = card.querySelector('#photo-err');
+          if (box && document.getElementById('sheet-card').contains(card)) box.textContent = 'Saved on this device only — upload failed: ' + why;
+          showToast('Photo saved on this device — upload failed: ' + why);
+        }
       });
     });
   });
