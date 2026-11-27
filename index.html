@@ -204,6 +204,32 @@
   .heads b{font-size:14px}
   .lvbtn.av-allergy{background:var(--busy);color:#fff} .lvbtn.av-avoid{background:#f1d9d4} .lvbtn.av-prefer{background:#ece8dc}
   .sheet-card .chip{margin:0 8px 4px 0}
+  /* Friends list + people pickers */
+  .fr-search{width:100%;box-sizing:border-box;border:1.5px solid var(--rule);border-radius:22px;background:var(--card);font:500 15px var(--sans);color:var(--ink);padding:10px 16px;margin:2px 0 10px}
+  .fr-pills{display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;margin-bottom:4px;-webkit-overflow-scrolling:touch}
+  .fr-pill{flex:none;border:1.5px solid var(--rule);background:var(--card);color:var(--soft);border-radius:18px;padding:5px 13px;font:600 13px var(--sans);cursor:pointer}
+  .fr-pill.on{background:var(--ink);border-color:var(--ink);color:#fff}
+  .fr-tools{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--soft);margin:2px 2px 8px}
+  .fr-tools button{border:none;background:none;color:var(--accent);font:600 12px var(--sans);cursor:pointer;padding:2px 4px}
+  .frow{display:flex;align-items:center;gap:12px;padding:10px 12px;margin-bottom:8px;border:1.5px solid var(--rule);border-radius:14px;background:var(--card)}
+  .frow.on{border-color:var(--accent);background:var(--accent-bg)}
+  .frow .av{--s:42px;flex:none;font-size:17px}
+  .frow .fmain{flex:1;min-width:0;cursor:pointer}
+  .frow .fname{font:700 15px var(--sans);color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .frow .fname.unnamed{font-style:italic;color:var(--soft)}
+  .frow .fsub{font-size:12px;color:var(--soft);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .frow .fsub .free{color:var(--good);font-weight:700}
+  .frow .fbtns{display:flex;gap:6px;align-items:center;flex:none}
+  .frow .ftog{width:30px;height:30px;border-radius:50%;border:2px solid var(--box);background:transparent;color:#fff;font-size:15px;line-height:1;cursor:pointer;padding:0}
+  .frow .ftog.on{background:var(--accent);border-color:var(--accent)}
+  .frow .nameit{border:none;background:none;color:var(--accent);font:600 12px var(--sans);padding:0;cursor:pointer;text-decoration:underline}
+  .fr-empty{text-align:center;padding:26px 8px;color:var(--soft);font-size:14px}
+  .prow{display:flex;align-items:center;gap:11px;padding:8px 10px;margin-bottom:6px;border:1.5px solid var(--rule);border-radius:12px;background:var(--card);cursor:pointer}
+  .prow:has(input:checked){border-color:var(--accent);background:var(--accent-bg)}
+  .prow input{width:20px;height:20px;flex:none;accent-color:var(--accent)}
+  .prow .av{--s:32px;flex:none;font-size:14px}
+  .prow .pn{font:600 14px var(--sans);color:var(--ink)}
+  .prow .pa{font-size:12px;color:var(--soft)}
   .trow{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--rule)}
   .trow .tn{font-size:15px}
   .lv{display:inline-flex;gap:2px}
@@ -289,6 +315,7 @@
 
 <div id="topbar">
   <b>Friend Calendar</b>
+  <button class="btn" id="friends-btn">Friends</button>
   <button class="btn" id="msg-btn">Messages</button>
   <button class="btn" id="notif-btn">Alerts</button>
   <button class="btn" id="local-btn">Events and spots</button>
@@ -2148,6 +2175,119 @@ function renderPlans(){
   });
 }
 
+/* ---------------- FRIENDS LIST ---------------- */
+// Nicknames are only ever offered for a friend whose profile has no name at
+// all (someone who signed up before names were saved properly). Stored on
+// this device only -- it's a label for YOU, not an edit to their account.
+function nickFor(id){ try { return (JSON.parse(localStorage.getItem('fc_nicknames') || '{}') || {})[id] || ''; } catch (e) { return ''; } }
+function setNick(id, name){
+  try { var m = JSON.parse(localStorage.getItem('fc_nicknames') || '{}') || {}; if (name) m[id] = name; else delete m[id]; localStorage.setItem('fc_nicknames', JSON.stringify(m)); } catch (e) {}
+}
+// "Free today 6–9pm" / "Free Sat 2–5pm" / "Nothing shared this week".
+function friendStatusHtml(p){
+  for (var i = 0; i < 7; i++) {
+    var date = addDaysStr(TODAY, i), w = windowsFor(p.id, date);
+    if (w.length) {
+      var when = i === 0 ? 'today' : (i === 1 ? 'tomorrow' : WEEKDAYS[wdMon0(date)].slice(0, 3));
+      return '<span class="free">Free ' + when + '</span> ' + fmtRange(w[0][0], w[0][1]);
+    }
+  }
+  return 'Nothing shared this week';
+}
+// One consistent "person" row for every picker (new chat, new/edit group).
+function personPickRow(p, cls, checked){
+  return '<label class="prow"><input type="checkbox" class="' + cls + '" value="' + p.id + '"' + (checked ? ' checked' : '') + '/>'
+    + avatarHtml(p, 32) + '<span><div class="pn">' + esc(p.name) + '</div>' + (p.area ? '<div class="pa">' + esc(p.area) + '</div>' : '') + '</span></label>';
+}
+var _frQ = '', _frGroup = null;
+function openFriends(){ _frQ = ''; _frGroup = null; renderFriends(); openSheet(); }
+function renderFriends(){
+  var card = document.getElementById('sheet-card');
+  var all = othersOrdered().filter(Boolean);
+  var pills = '<button class="fr-pill' + (!_frGroup ? ' on' : '') + '" data-frg="">All ' + all.length + '</button>'
+    + GROUPS.map(function(g){ return '<button class="fr-pill' + (_frGroup === g.id ? ' on' : '') + '" data-frg="' + g.id + '">' + esc(g.name) + '</button>'; }).join('');
+  card.innerHTML = '<h4>Friends</h4>'
+    + (all.length ? '<input type="text" class="fr-search" id="fr-q" placeholder="Search friends…" autocomplete="off" value="' + esc(_frQ) + '"/>' : '')
+    + (GROUPS.length ? '<div class="fr-pills">' + pills + '</div>' : '')
+    + '<div id="fr-list"></div>'
+    + '<button class="btn" id="fr-add" style="width:100%;margin-top:6px">+ Add a friend</button>'
+    + '<button class="btn ghost" id="fr-done" style="width:100%;margin-top:6px">Done</button>';
+  document.getElementById('fr-done').addEventListener('click', closeSheet);
+  document.getElementById('fr-add').addEventListener('click', openAddFriend);
+  card.querySelectorAll('[data-frg]').forEach(function(b){
+    b.addEventListener('click', function(){ _frGroup = b.dataset.frg || null; renderFriends(); });
+  });
+  var q = document.getElementById('fr-q');
+  if (q) q.addEventListener('input', function(){ _frQ = q.value; renderFriendsList(); });
+  renderFriendsList();
+}
+function renderFriendsList(){
+  var list = document.getElementById('fr-list');
+  if (!list) return;
+  var g = _frGroup ? GROUPS.filter(function(x){ return x.id === _frGroup; })[0] : null;
+  var q = _frQ.trim().toLowerCase();
+  var rows = othersOrdered().filter(Boolean).filter(function(p){
+    return (!g || g.memberIds.indexOf(p.id) !== -1) && (!q || p.name.toLowerCase().indexOf(q) !== -1 || (p.area || '').toLowerCase().indexOf(q) !== -1);
+  });
+  var everyone = othersOrdered().filter(Boolean);
+  if (!everyone.length) {
+    list.innerHTML = '<div class="fr-empty">No friends yet.<br>Tap “Add a friend” to share your QR code or link.</div>';
+    return;
+  }
+  if (!rows.length) { list.innerHTML = '<div class="fr-empty">No one matches.</div>'; return; }
+  var shown = rows.filter(function(p){ return selectedIds.indexOf(p.id) !== -1; }).length;
+  var h = '<div class="fr-tools"><span>' + shown + ' of ' + rows.length + ' shown on the calendar</span>'
+    + '<span><button data-frall="1">Show all</button><button data-frall="0">Hide all</button></span></div>';
+  h += rows.map(function(p){
+    var on = selectedIds.indexOf(p.id) !== -1;
+    return '<div class="frow' + (on ? ' on' : '') + '" data-fid="' + p.id + '">' + avatarHtml(p, 42)
+      + '<div class="fmain" data-ftog="' + p.id + '"><div class="fname' + (p.unnamed ? ' unnamed' : '') + '">' + esc(p.name) + '</div>'
+      + '<div class="fsub">' + (p.area ? esc(p.area) + ' · ' : '') + friendStatusHtml(p) + '</div>'
+      + (p.unnamed ? '<button class="nameit" data-fname="' + p.id + '">They haven’t set a name — name them</button>' : '') + '</div>'
+      + '<div class="fbtns"><button class="btn small" data-fmsg="' + p.id + '">Message</button>'
+      + '<button class="ftog' + (on ? ' on' : '') + '" data-ftog="' + p.id + '" aria-label="Show ' + esc(p.name) + ' on the calendar" aria-pressed="' + on + '">' + (on ? '✓' : '') + '</button></div></div>';
+  }).join('');
+  list.innerHTML = h;
+  list.querySelectorAll('[data-ftog]').forEach(function(b){
+    b.addEventListener('click', function(e){
+      if (e.target.closest && e.target.closest('[data-fname]')) return;
+      var id = b.dataset.ftog, i = selectedIds.indexOf(id);
+      if (i === -1) selectedIds.push(id); else selectedIds.splice(i, 1);
+      renderAll(); renderFriendsList();
+    });
+  });
+  list.querySelectorAll('[data-frall]').forEach(function(b){
+    b.addEventListener('click', function(){
+      rows.forEach(function(p){
+        var i = selectedIds.indexOf(p.id);
+        if (b.dataset.frall === '1' && i === -1) selectedIds.push(p.id);
+        if (b.dataset.frall === '0' && i !== -1) selectedIds.splice(i, 1);
+      });
+      renderAll(); renderFriendsList();
+    });
+  });
+  list.querySelectorAll('[data-fname]').forEach(function(b){
+    b.addEventListener('click', function(e){
+      e.stopPropagation();
+      var nm = window.prompt('What do you call them?', '');
+      if (nm === null) return;
+      nm = nm.trim().slice(0, 40);
+      if (!nm) return;
+      setNick(b.dataset.fname, nm);
+      var p = personById(b.dataset.fname); if (p) p.name = nm;
+      renderAll(); renderFriendsList();
+    });
+  });
+  list.querySelectorAll('[data-fmsg]').forEach(function(b){
+    b.addEventListener('click', function(){
+      var members = [viewerId, b.dataset.fmsg], t = findChat(members);
+      if (!t) t = newThread('chat', '', members);
+      renderThread(t.id);
+    });
+  });
+}
+document.getElementById('friends-btn').addEventListener('click', openFriends);
+
 /* ---------------- ADD FRIEND / ADD GROUP ---------------- */
 // Friends are real ActionSync crew. as_add_crew(other_id) already does
 // everything needed server-side -- creates crew in both directions and
@@ -2282,7 +2422,7 @@ function openAddGroup(){
     + '<div class="field"><label>Group name</label><input type="text" id="gr-name" placeholder="e.g. Ski crew"/></div>'
     + '<div class="sec">Members</div>'
     + PEOPLE.filter(function(p){ return p.id !== viewerId; })
-        .map(function(p){ return '<label class="check"><input type="checkbox" class="gr-member" value="' + p.id + '"/>' + esc(p.name) + '</label>'; }).join('')
+        .map(function(p){ return personPickRow(p, 'gr-member', false); }).join('')
     + '<div class="form-error" id="gr-error"></div>'
     + '<button class="btn" id="gr-save" style="width:100%">Create</button>'
     + '<button class="btn ghost" id="gr-cancel" style="width:100%;margin-top:6px">Cancel</button>';
@@ -2328,7 +2468,7 @@ function openEditGroup(g){
     + '<div class="field"><label>Group name</label><input type="text" id="gr-name" value="' + esc(g.name) + '"/></div>'
     + '<div class="sec">Members</div>'
     + PEOPLE.filter(function(p){ return p.id !== viewerId; })
-        .map(function(p){ return '<label class="check"><input type="checkbox" class="gr-member" value="' + p.id + '"' + (g.memberIds.indexOf(p.id) !== -1 ? ' checked' : '') + '/>' + esc(p.name) + '</label>'; }).join('')
+        .map(function(p){ return personPickRow(p, 'gr-member', g.memberIds.indexOf(p.id) !== -1); }).join('')
     + '<div class="form-error" id="gr-error"></div>'
     + '<button class="btn" id="gr-save" style="width:100%">Save changes</button>'
     + '<button class="btn ghost danger" id="gr-delete" style="width:100%;margin-top:6px">Delete group</button>'
@@ -2852,7 +2992,7 @@ function renderNewChat(){
   var card = document.getElementById('sheet-card');
   card.innerHTML = '<h4>New chat</h4>'
     + '<div class="sec" style="margin-top:4px">Who’s in it</div>'
-    + othersOrdered().map(function(p){ return '<label class="check"><input type="checkbox" class="nc-who" value="' + p.id + '"/><i class="dot" style="background:' + p.color + '"></i>' + esc(p.name) + '</label>'; }).join('')
+    + othersOrdered().map(function(p){ return personPickRow(p, 'nc-who', false); }).join('')
     + '<div class="field" style="margin-top:10px"><label>Name (optional, for group chats)</label><input type="text" id="nc-name" maxlength="40"/></div>'
     + '<div class="form-error" id="nc-error"></div>'
     + '<button class="btn" id="nc-go">Start chat</button><button class="btn ghost" id="nc-back">Back</button>';
@@ -4516,6 +4656,9 @@ function renderNewPassword(body){
   });
 }
 
+function hasProfileName(row){
+  return !!(row && (row.display_name || row.name || row.first_name || row.last_name || row.username));
+}
 function nameOfProfile(row){
   return (row && (row.display_name || row.name
     || [row.first_name, row.last_name].filter(Boolean).join(' ')
@@ -4602,7 +4745,11 @@ function loadPeopleAndGroups(){
     })
     .then(function(crewRows){
       crewRows.forEach(function(row, i){
-        PEOPLE.push({ id:row.id, name:nameOfProfile(row), color:PERSON_COLORS[(i + 1) % PERSON_COLORS.length],
+        // A profile with no name at all used to show as "Someone" everywhere.
+        // Now it's "New friend" (or the nickname you gave them) and the
+        // Friends list offers a one-tap way to name them.
+        var real = hasProfileName(row) ? nameOfProfile(row) : '';
+        PEOPLE.push({ id:row.id, name:real || nickFor(row.id) || 'New friend', unnamed:!real, color:PERSON_COLORS[(i + 1) % PERSON_COLORS.length],
                       photo:row.photo_url || '', area:row.location || '', simulated:false, blocks:[] });
       });
       selectedIds = PEOPLE.map(function(p){ return p.id; });
