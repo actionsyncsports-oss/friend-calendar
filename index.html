@@ -252,6 +252,17 @@
   .addrow .ic svg{width:21px;height:21px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
   .addrow b{display:block;font:700 15px var(--sans)}
   .addrow .d{font-size:12px;color:var(--soft);display:block;margin-top:1px}
+  .vp .vp-mode{width:100%;padding:7px 2px;border:none;border-bottom:1.5px solid var(--rule);background:transparent;border-radius:0;font:500 15px var(--sans);color:var(--ink)}
+  .vp .vp-box{margin-top:8px;border:1.5px solid var(--rule);border-radius:12px;padding:6px 10px 6px;background:var(--card)}
+  .vp .vp-h{font:700 11px var(--sans);letter-spacing:.05em;text-transform:uppercase;color:var(--soft);margin:8px 0 6px}
+  .vp .vp-h i{font-style:normal;text-transform:none;letter-spacing:0;font-weight:500;margin-left:6px}
+  .vp .vp-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:4px}
+  .vp .vpchip{display:inline-flex;align-items:center;gap:6px;border:1.5px solid var(--rule);border-radius:999px;padding:4px 11px 4px 5px;font:600 13px var(--sans);color:var(--ink);cursor:pointer;background:var(--paper);margin:0}
+  .vp .vpchip.grp{padding:5px 13px}
+  .vp .vpchip input{position:absolute;opacity:0;pointer-events:none;width:0;height:0}
+  .vp .vpchip:has(input:checked){background:var(--accent-bg);border-color:var(--accent);font-weight:700}
+  .vp .vpchip.grp:has(input:checked){background:var(--accent);border-color:var(--accent);color:#fff}
+  .vp .vp-sum{font-size:12px;color:var(--soft);margin:4px 0 4px}
   .rvrow{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:13px;color:var(--soft)}
   .rvrow input[type=date]{flex:1;min-width:0;font:500 14px var(--sans);padding:6px 6px;border:1.5px solid var(--rule);border-radius:8px;background:var(--card);color:var(--ink)}
   .rvrow select{font:500 14px var(--sans);padding:6px 3px;border:1.5px solid var(--rule);border-radius:8px;background:var(--card);color:var(--ink)}
@@ -1620,17 +1631,6 @@ function meetFieldHtml(id, cur){
 function renderFreeForm(date, editBlock){
   var viewer = personById(viewerId);
   var weekDays = weekDaysFrom(date);
-  // A visibleTo array that happens to exactly match a group's current
-  // membership is shown as that group selected, not as "Pick people" --
-  // same reverse-mapping either way in or out of edit mode.
-  var visSel = 'all', visPick = [];
-  if (editBlock && Array.isArray(editBlock.visibleTo)) {
-    var matchGroup = GROUPS.filter(function(g){
-      var gm = g.memberIds.filter(function(id){ return id !== viewerId; }).slice().sort().join(',');
-      return gm === editBlock.visibleTo.slice().sort().join(',');
-    })[0];
-    if (matchGroup) visSel = 'g:' + matchGroup.id; else { visSel = 'pick'; visPick = editBlock.visibleTo; }
-  }
   var html = '<h4>' + (editBlock ? 'Edit free time' : 'Add free time') + '</h4><div style="font-size:12px;color:var(--soft);margin-bottom:10px">' + longDate(date) + '</div>'
     + (editBlock ? '' : '<div class="field"><label>Which day(s) this week</label>'
     + '<div style="display:flex;gap:5px;flex-wrap:wrap;">' + weekDays.map(function(d){
@@ -1651,12 +1651,7 @@ function renderFreeForm(date, editBlock){
       + '<div id="blk-tz-hint" style="font-size:11px;color:var(--soft);margin-top:4px">' + (editBlock && editBlock.tz ? 'Time zone: ' + esc(editBlock.tz) : '') + '</div></div>'
     + '<label class="check"><input type="checkbox" id="blk-travel"' + (editBlock && editBlock.travel ? ' checked' : '') + '/> I can travel to meet (nearby towns are fine)</label>'
     + '</div>'
-    + '<div class="field"><label>Who can see this</label><select id="blk-vis"><option value="all">All my friends</option>'
-      + GROUPS.map(function(g){ return '<option value="g:' + g.id + '">Just ' + esc(g.name) + '</option>'; }).join('')
-      + '<option value="pick">Pick people…</option></select></div>'
-    + '<div id="blk-pick" style="' + (visSel === 'pick' ? '' : 'display:none') + ';margin:-4px 0 8px">'
-      + othersOrdered().map(function(x){ return '<label class="check"><input type="checkbox" class="blk-who" value="' + x.id + '"' + (visPick.indexOf(x.id) !== -1 ? ' checked' : '') + '/><i class="dot" style="background:' + x.color + '"></i>' + esc(x.name) + '</label>'; }).join('')
-    + '</div>'
+    + '<div class="field"><label>Who can see this</label>' + visPickerHtml('blk-vis', editBlock ? editBlock.visibleTo : 'all') + '</div>'
     + (editBlock ? '' : '<label class="check"><input type="checkbox" id="blk-repeat"/> Repeat weekly on the checked day(s)</label>'
     + '<div id="blk-repeat-until" style="display:none" class="field"><label>Ends</label><select id="blk-repeat-weeks">'
       + '<option value="4">In 4 weeks</option><option value="8">In 8 weeks</option><option value="12" selected>In 12 weeks</option>'
@@ -1667,7 +1662,6 @@ function renderFreeForm(date, editBlock){
 
   document.getElementById('sheet-card').innerHTML = html;
   document.getElementById('blk-level').value = editBlock ? (editBlock.level || 'free') : 'free';
-  document.getElementById('blk-vis').value = visSel;
   document.getElementById('ft-back').addEventListener('click', function(){ renderDaySheet(); });
   document.getElementById('blk-where').addEventListener('change', function(){
     document.getElementById('blk-other').style.display = this.value === '@other' ? 'block' : 'none';
@@ -1693,9 +1687,6 @@ function renderFreeForm(date, editBlock){
     document.getElementById('blk-location-fields').style.display = this.value === 'remote' ? 'none' : 'block';
   });
   if (editBlock && editBlock.remote) document.getElementById('blk-location-fields').style.display = 'none';
-  document.getElementById('blk-vis').addEventListener('change', function(){
-    document.getElementById('blk-pick').style.display = this.value === 'pick' ? 'block' : 'none';
-  });
   if (!editBlock) document.getElementById('blk-repeat').addEventListener('change', function(){
     document.getElementById('blk-repeat-until').style.display = this.checked ? 'block' : 'none';
   });
@@ -1705,14 +1696,8 @@ function renderFreeForm(date, editBlock){
     if (e <= s) { err.textContent = 'The end has to be after the start.'; return; }
     var days = editBlock ? [editBlock.date] : Array.from(document.querySelectorAll('.blk-day:checked')).map(function(cb){ return cb.value; });
     if (!days.length) { err.textContent = 'Pick at least one day.'; return; }
-    var vis = document.getElementById('blk-vis').value, visibleTo = 'all';
-    if (vis.indexOf('g:') === 0) {
-      var gg = GROUPS.filter(function(x){ return x.id === vis.slice(2); })[0];
-      visibleTo = gg.memberIds.filter(function(id){ return id !== viewerId; });          // a snapshot of the group's members right now
-    } else if (vis === 'pick') {
-      visibleTo = Array.from(document.querySelectorAll('.blk-who:checked')).map(function(cb){ return cb.value; });
-      if (!visibleTo.length) { err.textContent = 'Pick at least one person, or choose All my friends.'; return; }
-    }
+    var visibleTo = readVis('blk-vis');
+    if (Array.isArray(visibleTo) && !visibleTo.length) { err.textContent = 'Tick at least one group or person, or choose All my friends.'; return; }
     var meet = document.getElementById('blk-meet').value, remote = meet === 'remote', remoteAlso = meet === 'both';
     var where = document.getElementById('blk-where').value, areaTxt = document.getElementById('blk-area').value.trim();
     if (!remote && where === '@other' && !areaTxt) { err.textContent = 'Type the town, or choose your usual place.'; return; }
@@ -1795,15 +1780,10 @@ function availVisibleTo(vis, pick){
   return g ? g.memberIds.filter(function(id){ return id !== viewerId; }) : [];   // a snapshot of the group's members right now
 }
 function availSlotHtml(sl, i, multi){
-  var groupOpts = GROUPS.map(function(g){ return '<option value="g:' + g.id + '"' + (sl.vis === 'g:' + g.id ? ' selected' : '') + '>Just ' + esc(g.name) + '</option>'; }).join('');
   return '<div class="av-slot" data-i="' + i + '" style="border:1.5px solid var(--rule);border-radius:10px;padding:10px 12px;margin-bottom:10px">'
     + '<div class="row2"><div class="field"><label>From</label><select class="av-start">' + timeOptions(sl.start, HMIN, HMAX - 1) + '</select></div>'
     + '<div class="field"><label>To</label><select class="av-end">' + timeOptions(sl.end, HMIN + 1, HMAX) + '</select></div></div>'
-    + '<div class="field"><label>Who can see this</label><select class="av-vis"><option value="all"' + (sl.vis === 'all' ? ' selected' : '') + '>All my friends</option>'
-      + groupOpts + '<option value="pick"' + (sl.vis === 'pick' ? ' selected' : '') + '>Pick people…</option></select></div>'
-    + '<div class="av-pick" style="' + (sl.vis === 'pick' ? '' : 'display:none') + ';margin:-4px 0 4px">'
-      + othersOrdered().map(function(x){ return '<label class="check"><input type="checkbox" class="av-who" value="' + x.id + '"' + (sl.pick.indexOf(x.id) !== -1 ? ' checked' : '') + '/><i class="dot" style="background:' + x.color + '"></i>' + esc(x.name) + '</label>'; }).join('')
-    + '</div>'
+    + '<div class="field"><label>Who can see this</label>' + visPickerHtml('av-vp-' + i, sl.vis === 'pick' ? sl.pick : 'all') + '</div>'
     + (multi && i > 0 ? '<button class="btn small danger av-del" data-i="' + i + '">Remove this time</button>' : '') + '</div>';
 }
 // Reads the time rows back out of the form into availSlots, so adding or
@@ -1814,17 +1794,15 @@ function collectAvailSlots(){
     if (!sl) return;
     sl.start = Number(el.querySelector('.av-start').value);
     sl.end = Number(el.querySelector('.av-end').value);
-    sl.vis = el.querySelector('.av-vis').value;
-    sl.pick = Array.from(el.querySelectorAll('.av-who:checked')).map(function(c){ return c.value; });
+    var v = readVis(el.querySelector('.vp'));
+    sl.vis = Array.isArray(v) ? 'pick' : 'all';
+    sl.pick = Array.isArray(v) ? v : [];
   });
 }
 function renderAvailSlots(){
   var box = document.getElementById('av-slots');
   var shown = availMulti ? availSlots : availSlots.slice(0, 1);
   box.innerHTML = shown.map(function(sl, i){ return availSlotHtml(sl, i, availMulti); }).join('');
-  box.querySelectorAll('.av-vis').forEach(function(sel){
-    sel.addEventListener('change', function(){ sel.closest('.av-slot').querySelector('.av-pick').style.display = sel.value === 'pick' ? 'block' : 'none'; });
-  });
   box.querySelectorAll('.av-del').forEach(function(b){
     b.addEventListener('click', function(){ collectAvailSlots(); availSlots.splice(Number(b.dataset.i), 1); renderAvailSlots(); });
   });
@@ -1969,13 +1947,7 @@ function renderPlanForm(date, start, end, whoIds, openIds, place){
     + '<div class="sec">Invite</div>'
     + (freeNow.length ? freeNow.map(function(id){ return invRow(id, true); }).join('') : '<div style="font-size:13px;color:var(--soft)">Nobody you’re counting lines up here, but you can still invite people.</div>')
     + notNow.map(function(id){ return invRow(id, false); }).join('')
-    + '<div class="field"><label>Who else can see this (not invited, just visible)</label><select id="plan-vis"><option value="invited" selected>Just the people invited</option>'
-      + '<option value="all">All my friends</option>'
-      + GROUPS.map(function(g){ return '<option value="g:' + g.id + '">Just ' + esc(g.name) + '</option>'; }).join('')
-      + '<option value="pick">Pick people…</option></select></div>'
-    + '<div id="plan-vis-pick" style="display:none;margin:-4px 0 8px">'
-      + othersOrdered().map(function(x){ return '<label class="check"><input type="checkbox" class="plan-vis-who" value="' + x.id + '"/><i class="dot" style="background:' + x.color + '"></i>' + esc(x.name) + '</label>'; }).join('')
-    + '</div>'
+    + '<div class="field"><label>Who else can see this (not invited, just visible)</label>' + visPickerHtml('plan-vis', 'invited', { extra:[['invited', 'Just the people invited']] }) + '</div>'
     + '<div style="font-size:12px;color:var(--soft);margin:-4px 0 10px">Someone who can see it but isn’t invited can tap in to join — they’re not added until they do.</div>'
     + '<div class="form-error" id="plan-error"></div>'
     + '<button class="btn" id="plan-save" style="width:100%">Send invites</button>'
@@ -2015,9 +1987,6 @@ function renderPlanForm(date, start, end, whoIds, openIds, place){
   document.getElementById('plan-item').addEventListener('change', showSpots);
   document.getElementById('plan-where').addEventListener('change', showSpots);
   document.getElementById('plan-back').addEventListener('click', function(){ renderDaySheet(); });
-  document.getElementById('plan-vis').addEventListener('change', function(){
-    document.getElementById('plan-vis-pick').style.display = this.value === 'pick' ? 'block' : 'none';
-  });
   document.getElementById('plan-save').addEventListener('click', function(){
     var title = document.getElementById('plan-title').value.trim();
     var s = Number(document.getElementById('plan-start').value), e = Number(document.getElementById('plan-end').value);
@@ -2028,14 +1997,8 @@ function renderPlanForm(date, start, end, whoIds, openIds, place){
     if (!invited.length) { err.textContent = 'Invite at least one person.'; return; }
     var rsvps = {}; rsvps[viewerId] = 'going';
     invited.forEach(function(id){ rsvps[id] = 'invited'; });
-    var vis = document.getElementById('plan-vis').value, visibleTo = 'invited';
-    if (vis === 'all') visibleTo = 'all';
-    else if (vis.indexOf('g:') === 0) {
-      var vg = GROUPS.filter(function(x){ return x.id === vis.slice(2); })[0];
-      visibleTo = vg ? vg.memberIds.filter(function(id){ return id !== viewerId; }) : 'invited';
-    } else if (vis === 'pick') {
-      visibleTo = Array.from(document.querySelectorAll('.plan-vis-who:checked')).map(function(cb){ return cb.value; });
-    }
+    var visibleTo = readVis('plan-vis');
+    if (Array.isArray(visibleTo) && !visibleTo.length) visibleTo = 'invited';
     var plan = { id:newId('plan'), date:date, start:s, end:e, title:title, item: document.getElementById('plan-item').value || null, area: document.getElementById('plan-where').value.trim(),
                  spot: document.getElementById('plan-spot').value.trim(), notes: document.getElementById('plan-notes').value.trim(), creatorId:viewerId, rsvps:rsvps, visibleTo:visibleTo,
                  createdAt:nowIso(), rsvpUpdatedAt:{} };
@@ -2387,7 +2350,8 @@ function applyRhythm(r){
   syncMyProfile();
   removeByPrefix('sleep_'); removeByPrefix('auto_');
   var visibleTo = 'all';
-  if (r.vis && r.vis !== 'all') {
+  if (Array.isArray(r.vis)) visibleTo = r.vis;
+  else if (r.vis && r.vis !== 'all') {   // an older single-group setting
     var g = GROUPS.filter(function(x){ return x.id === r.vis; })[0];
     if (g) visibleTo = g.memberIds.filter(function(id){ return id !== viewerId; });
   }
@@ -2558,8 +2522,9 @@ function bindRhythm(card){
       if (!d.off && d.bed <= d.wake) { err.textContent = WEEKDAYS[i] + ': bed time has to be after you get up (or tick “not available”).'; return; }
       days.push(d);
     }
-    var vis = document.getElementById('rh-vis').value;
-    applyRhythm({ days:days, level:document.getElementById('rh-level').value, vis:vis === 'all' ? 'all' : vis.slice(2) });
+    var vis = readVis('rh-vis');
+    if (Array.isArray(vis) && !vis.length) { err.textContent = 'Tick at least one group or person, or choose All my friends.'; return; }
+    applyRhythm({ days:days, level:document.getElementById('rh-level').value, vis:vis });
     showToast('Availability filled in around your work and sleep');
     renderAll(); renderWork('rhythm');
   });
@@ -2730,8 +2695,10 @@ function renderWork(tab){
         + '<label>Before work<select class="rh-before">' + bo(c.before) + '</select></label>'
         + '<label>After work<select class="rh-after">' + bo(c.after) + '</select></label></div></div>';
     }
-    h += '<div class="field" style="margin-top:12px"><label>Who sees this free time</label><select id="rh-vis"><option value="all">All my friends</option>'
-      + GROUPS.map(function(g){ return '<option value="g_' + g.id + '"' + (rr.vis === g.id ? ' selected' : '') + '>Just ' + esc(g.name) + '</option>'; }).join('') + '</select></div>'
+    var rhCur = 'all';
+    if (Array.isArray(rr.vis)) rhCur = rr.vis;
+    else if (rr.vis && rr.vis !== 'all') { var rg = GROUPS.filter(function(x){ return x.id === rr.vis; })[0]; rhCur = rg ? rg.memberIds.filter(function(id){ return id !== viewerId; }) : 'all'; }   // an older single-group setting
+    h += '<div class="field" style="margin-top:12px"><label>Who sees this free time</label>' + visPickerHtml('rh-vis', rhCur) + '</div>'
       + '<div class="field"><label>Show it as</label><select id="rh-level"><option value="free"' + (rr.level !== 'open' ? ' selected' : '') + '>Free</option><option value="open"' + (rr.level === 'open' ? ' selected' : '') + '>Open — around if something’s on</option></select></div>'
       + '<div class="form-error" id="rh-error"></div>'
       + '<button class="btn" id="rh-save" style="width:100%">' + (applied ? 'Update my availability' : 'Fill in my availability') + '</button>'
@@ -2910,6 +2877,73 @@ function renderTrips(){
     });
   });
 }
+
+/* ---------------- WHO-CAN-SEE PICKER ---------------- */
+// One picker for every "who can see this": All my friends, or specific groups AND/OR people.
+// Groups are shortcuts that tick their members, so two groups (or a group plus one extra person)
+// can all see the same thing. The result is 'all' or a plain array of person ids -- the same shape
+// visibleTo has always had -- a snapshot of who's ticked right now.
+//   cur:  'all' | 'invited' | [personIds]        opts.extra: [['invited','Just the people invited']]
+function visPickerHtml(id, cur, opts){
+  opts = opts || {};
+  var extra = opts.extra || [], isArr = Array.isArray(cur);
+  var mode = isArr ? 'pick' : (cur || (extra[0] ? extra[0][0] : 'all')), picked = isArr ? cur : [];
+  var others = othersOrdered().filter(Boolean);
+  var h = '<div class="vp" id="' + id + '"><select class="vp-mode" aria-label="Who can see this">'
+    + extra.map(function(o){ return '<option value="' + o[0] + '"' + (mode === o[0] ? ' selected' : '') + '>' + esc(o[1]) + '</option>'; }).join('')
+    + '<option value="all"' + (mode === 'all' ? ' selected' : '') + '>All my friends</option>'
+    + '<option value="pick"' + (mode === 'pick' ? ' selected' : '') + '>Specific groups or people…</option></select>'
+    + '<div class="vp-box" style="display:' + (mode === 'pick' ? 'block' : 'none') + '">';
+  if (GROUPS.length) {
+    h += '<div class="vp-h">Groups <i>tick as many as you like</i></div><div class="vp-chips">' + GROUPS.map(function(g){
+      var mem = g.memberIds.filter(function(m){ return m !== viewerId; });
+      var on = mem.length > 0 && mem.every(function(m){ return picked.indexOf(m) !== -1; });
+      return '<label class="vpchip grp"><input type="checkbox" class="vp-g" data-members="' + esc(mem.join(',')) + '"' + (on ? ' checked' : '') + '/>' + esc(g.name) + '</label>';
+    }).join('') + '</div>';
+  }
+  h += '<div class="vp-h">People</div><div class="vp-chips">' + (others.length ? others.map(function(q){
+    return '<label class="vpchip"><input type="checkbox" class="vp-p" value="' + q.id + '"' + (picked.indexOf(q.id) !== -1 ? ' checked' : '') + '/>' + avatarHtml(q, 20) + esc(q.name) + '</label>';
+  }).join('') : '<span style="font-size:12px;color:var(--soft)">No friends added yet.</span>') + '</div>'
+    + '<div class="vp-sum"></div></div></div>';
+  return h;
+}
+// Reads a picker (by id, or the element itself): 'all', 'invited' (if offered), or [personIds].
+function readVis(idOrEl){
+  var el = typeof idOrEl === 'string' ? document.getElementById(idOrEl) : idOrEl;
+  if (!el) return 'all';
+  var mode = el.querySelector('.vp-mode').value;
+  if (mode !== 'pick') return mode;
+  return Array.prototype.map.call(el.querySelectorAll('.vp-p:checked'), function(c){ return c.value; });
+}
+function vpRefresh(vp){
+  var ticked = {}; vp.querySelectorAll('.vp-p:checked').forEach(function(c){ ticked[c.value] = 1; });
+  vp.querySelectorAll('.vp-g').forEach(function(g){
+    var mem = g.dataset.members ? g.dataset.members.split(',') : [];
+    g.checked = mem.length > 0 && mem.every(function(m){ return ticked[m]; });
+  });
+  var n = Object.keys(ticked).length, sum = vp.querySelector('.vp-sum');
+  if (sum) sum.textContent = n ? 'Seen by ' + n + (n === 1 ? ' person' : ' people') : 'Tick at least one group or person.';
+}
+document.addEventListener('change', function(e){
+  var t = e.target, vp = t && t.closest ? t.closest('.vp') : null;
+  if (!vp) return;
+  if (t.classList.contains('vp-mode')) {
+    var box = vp.querySelector('.vp-box'); box.style.display = t.value === 'pick' ? 'block' : 'none';
+    if (t.value === 'pick') vpRefresh(vp);
+  } else if (t.classList.contains('vp-g')) {
+    (t.dataset.members ? t.dataset.members.split(',') : []).forEach(function(m){
+      var c = vp.querySelector('.vp-p[value="' + m + '"]'); if (c) c.checked = t.checked;
+    });
+    vpRefresh(vp);
+  } else if (t.classList.contains('vp-p')) vpRefresh(vp);
+});
+// Fill in the "Seen by N" line for pickers that open already in "specific" mode.
+new MutationObserver(function(muts){
+  muts.forEach(function(m){ m.addedNodes.forEach(function(n){
+    if (n.nodeType !== 1) return;
+    (n.matches && n.matches('.vp') ? [n] : Array.prototype.slice.call(n.querySelectorAll ? n.querySelectorAll('.vp') : [])).forEach(vpRefresh);
+  }); });
+}).observe(document.body, { childList:true, subtree:true });
 
 /* ---------------- FRIENDS LIST ---------------- */
 // Nicknames are only ever offered for a friend whose profile has no name at
@@ -4458,7 +4492,7 @@ function sourcesTabHtml(){
     + '<div class="field"><label>Town these events are in</label><input type="text" id="src-area" maxlength="60" value="' + esc(currentArea() || areaOf(viewerId)) + '"/></div>'
     + '<div class="field"><label>Kind of thing (so it matches people’s tastes)</label><select id="src-item"><option value="">Mixed</option>'
       + CATALOG.filter(function(c){ return c[2] !== 'vibe'; }).map(function(c){ return '<option value="' + c[0] + '">' + esc(c[1]) + '</option>'; }).join('') + '</select></div>'
-    + '<div class="field"><label>Who sees these events</label><select id="src-vis"><option value="all">All my friends</option>' + GROUPS.map(function(g){ return '<option value="g:' + g.id + '">Just ' + esc(g.name) + '</option>'; }).join('') + '</select></div>'
+    + '<div class="field"><label>Who sees these events</label>' + visPickerHtml('src-vis', 'all') + '</div>'
     + '<details style="margin:2px 0 8px"><summary style="font-size:13px;color:var(--accent);cursor:pointer">Site won’t load? Paste its text instead</summary>'
       + '<div style="font-size:12px;color:var(--soft);margin:6px 0">Open the feed address in a new tab, select all, copy, and paste here. This reads it once and can’t update itself.</div>'
       + '<textarea id="src-paste" rows="4" style="width:100%;box-sizing:border-box;font:13px var(--sans);border:1.5px solid var(--rule);border-radius:6px;background:transparent;color:var(--ink)" maxlength="2000000"></textarea></details>'
@@ -4485,8 +4519,8 @@ function bindSources(){
     if (!u) { err.textContent = 'That doesn’t look like a web address.'; return; }
     if (privateHost(u.hostname)) { err.textContent = 'That address isn’t a public website.'; return; }
     if (SOURCES.some(function(s){ return s.url === u.href && srcVisible(s, viewerId); })) { err.textContent = 'You’re already following that.'; return; }
-    var vis = document.getElementById('src-vis').value, visibleTo = 'all';
-    if (vis.indexOf('g:') === 0) visibleTo = GROUPS.filter(function(g){ return g.id === vis.slice(2); })[0].memberIds.filter(function(i){ return i !== viewerId; });
+    var visibleTo = readVis('src-vis');
+    if (Array.isArray(visibleTo) && !visibleTo.length) { err.textContent = 'Tick at least one group or person, or choose All my friends.'; return; }
     var host = u.hostname.replace(/^www\./, '');
     var src = { id:newId('src'), name:cleanText(document.getElementById('src-name').value, 60) || host, url:u.href, host:host, area:cleanText(document.getElementById('src-area').value, 60),
                 item:document.getElementById('src-item').value, visibleTo:visibleTo, by:viewerId, status:'checking', msg:'', count:0, lastSync:null, pasted:!!paste };
@@ -4499,7 +4533,7 @@ function bindSources(){
   });
 }
 
-function eventFormHtml(date, area){
+function eventFormHtml(date, area, vis){
   return (date ? '<input type="hidden" id="ev-date" value="' + esc(date) + '"/>' : '<div class="field"><label>Date</label><input type="date" id="ev-date" value="' + esc(TODAY) + '"/></div>')
     + '<div class="field"><label>What is it</label><input type="text" id="ev-title" maxlength="80"/></div>'
     + '<div class="row2"><div class="field"><label>From</label><select id="ev-start">' + timeOptions(18, HMIN, HMAX - 1) + '</select></div><div class="field"><label>To</label><select id="ev-end">' + timeOptions(21, HMIN + 1, HMAX) + '</select></div></div>'
@@ -4508,7 +4542,7 @@ function eventFormHtml(date, area){
       + CATALOG.filter(function(c){ return c[2] !== 'vibe'; }).map(function(c){ return '<option value="' + c[0] + '">' + esc(c[1]) + '</option>'; }).join('') + '</select></div>'
     + '<div class="field"><label>Note (optional)</label><input type="text" id="ev-note" maxlength="140"/></div>'
     + '<div class="field"><label>Link (optional)</label><input type="text" id="ev-url" placeholder="https://" maxlength="300"/></div>'
-    + '<div class="field"><label>Who sees it</label><select id="ev-vis"><option value="all">All my friends</option>' + GROUPS.map(function(g){ return '<option value="g:' + g.id + '">Just ' + esc(g.name) + '</option>'; }).join('') + '</select></div>'
+    + '<div class="field"><label>Who sees it</label>' + visPickerHtml('ev-vis', Array.isArray(vis) ? vis : 'all') + '</div>'
     + '<div class="form-error" id="ev-error"></div>';
 }
 // editEvent, when given, saves changes to that existing (manually-
@@ -4522,8 +4556,8 @@ function bindEventSave(done, editEvent){
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || dstrFromDate(parseDate(date)) !== date) { err.textContent = 'Date should look like 2026-10-24.'; return; }
     if (en <= st) { err.textContent = 'The end has to be after the start.'; return; }
     if (url && !safeUrl(url)) { err.textContent = 'The link should start with http:// or https://.'; return; }
-    var vis = document.getElementById('ev-vis').value, visibleTo = 'all';
-    if (vis.indexOf('g:') === 0) visibleTo = GROUPS.filter(function(g){ return g.id === vis.slice(2); })[0].memberIds.filter(function(i){ return i !== viewerId; });
+    var visibleTo = readVis('ev-vis');
+    if (Array.isArray(visibleTo) && !visibleTo.length) { err.textContent = 'Tick at least one group or person, or choose All my friends.'; return; }
     if (editEvent) {
       editEvent.title = title; editEvent.date = date; editEvent.start = st; editEvent.end = en;
       editEvent.area = document.getElementById('ev-area').value.trim(); editEvent.item = document.getElementById('ev-item').value;
@@ -4541,7 +4575,7 @@ function bindEventSave(done, editEvent){
 }
 function renderEditEvent(ev){
   document.getElementById('sheet-card').innerHTML = '<h4>Edit event</h4><div style="font-size:12px;color:var(--soft);margin-bottom:10px">' + longDate(ev.date) + '</div>'
-    + eventFormHtml(ev.date, ev.area)
+    + eventFormHtml(ev.date, ev.area, ev.visibleTo)
     + '<button class="btn" id="ev-save" style="width:100%">Save changes</button><button class="btn ghost" id="ev-back" style="width:100%;margin-top:6px">Cancel</button>';
   document.getElementById('ev-title').value = ev.title;
   document.getElementById('ev-start').value = ev.start;
@@ -4549,13 +4583,6 @@ function renderEditEvent(ev){
   document.getElementById('ev-item').value = ev.item || '';
   document.getElementById('ev-note').value = ev.note || '';
   document.getElementById('ev-url').value = ev.url || '';
-  if (Array.isArray(ev.visibleTo)) {
-    var matchGroup = GROUPS.filter(function(g){
-      var gm = g.memberIds.filter(function(id){ return id !== viewerId; }).slice().sort().join(',');
-      return gm === ev.visibleTo.slice().sort().join(',');
-    })[0];
-    if (matchGroup) document.getElementById('ev-vis').value = 'g:' + matchGroup.id;
-  }
   document.getElementById('ev-back').addEventListener('click', function(){ renderDaySheet(); });
   bindEventSave(function(){ renderDaySheet(); renderCalendar(); renderBadges(); }, ev);
 }
