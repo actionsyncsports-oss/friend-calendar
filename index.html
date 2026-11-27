@@ -204,6 +204,11 @@
   .heads b{font-size:14px}
   .lvbtn.av-allergy{background:var(--busy);color:#fff} .lvbtn.av-avoid{background:#f1d9d4} .lvbtn.av-prefer{background:#ece8dc}
   .sheet-card .chip{margin:0 8px 4px 0}
+  .wkrow{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--rule)}
+  .wkday{font:600 14px var(--sans);color:var(--ink);display:flex;align-items:center;gap:8px;margin:0}
+  .wkday input{width:18px;height:18px;accent-color:var(--accent)}
+  .wkt{font-size:13px;color:var(--soft);white-space:nowrap}
+  .wkt select{font:500 14px var(--sans);padding:5px 4px;border:1.5px solid var(--rule);border-radius:8px;background:var(--card);color:var(--ink)}
   /* Friends list + people pickers */
   .field input.fr-search, .fr-search{width:100%;box-sizing:border-box;border:1.5px solid var(--rule);border-radius:22px;background:var(--card);font:500 15px var(--sans);color:var(--ink);padding:10px 16px;margin:2px 0 10px}
   .fr-pills{display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;margin-bottom:4px;-webkit-overflow-scrolling:touch}
@@ -322,6 +327,7 @@
 <div id="topbar">
   <b>Friend Calendar</b>
   <button class="btn" id="friends-btn">Friends</button>
+  <button class="btn" id="work-btn">Work hours</button>
   <button class="btn" id="msg-btn">Messages</button>
   <button class="btn" id="notif-btn">Alerts</button>
   <button class="btn" id="local-btn">Events and spots</button>
@@ -950,6 +956,7 @@ function uncancelBlockDate(b, date){
 function consumeAvailability(personId, date, start, end){
   var p = personById(personId); if (!p) return;
   p.blocks.forEach(function(b){
+    if (blockLevel(b) === 0) return;   // a plan never lifts work/busy time
     if (blockApplies(b, date) && b.start < end && b.end > start) {
       cancelBlockDate(b, date);
       if (personId === viewerId) syncBlockUpsert(b);   // crew's own blocks aren't synced from here -- RLS only allows writing your own, and that's correct: their own session is what should persist their own reaction
@@ -963,6 +970,7 @@ function consumeAvailability(personId, date, start, end){
 function restoreAvailability(personId, date, start, end){
   var p = personById(personId); if (!p) return;
   p.blocks.forEach(function(b){
+    if (blockLevel(b) === 0) return;
     if (isCancelledOn(b, date) && b.start < end && b.end > start) {
       uncancelBlockDate(b, date);
       if (personId === viewerId) syncBlockUpsert(b);
@@ -972,7 +980,10 @@ function restoreAvailability(personId, date, start, end){
 // A block has a LEVEL ('free' = actually available, 'open' = around and up for something
 // if the person/plan is right) and an AUDIENCE (visibleTo: 'all' friends, or a list of person ids).
 // Missing fields mean free + everyone, so older blocks keep working.
-function blockLevel(b){ return b.level === 'open' ? 1 : 2; }          // 2 = free, 1 = open
+// 0 = BUSY (work, an appointment...): not an offer at all, it CLOSES OUT any
+// free time that overlaps it. Stored as level:'busy' on the same table, so no
+// schema change was needed.
+function blockLevel(b){ return b.level === 'busy' ? 0 : (b.level === 'open' ? 1 : 2); }          // 2 = free, 1 = open
 function canSee(b, ownerId, viewer){
   if (ownerId === viewer) return true;                               // you always see all of your own
   return !b.visibleTo || b.visibleTo === 'all' || b.visibleTo.indexOf(viewer) !== -1;
@@ -1022,10 +1033,15 @@ function blocksOnViewerDate(personId, date, viewer){
 // Per hour: level (0 none, 1 open, 2 free) and place key (null = unknown / can travel).
 function hourDetail(personId, date, viewer){
   viewer = viewer || viewerId;
-  var lv = [], ar = [], lab = {};
-  for (var h = HMIN; h < HMAX; h++) { lv.push(0); ar.push(null); }
+  var lv = [], ar = [], lab = {}, busy = [];
+  for (var h = HMIN; h < HMAX; h++) { lv.push(0); ar.push(null); busy.push(false); }
   blocksOnViewerDate(personId, date, viewer).forEach(function(x){
-    var pl = blockPlace(x.block, personId, x.ownerDate, viewer), L = blockLevel(x.block);
+    var L = blockLevel(x.block);
+    if (L === 0) {   // busy: remembered, then subtracted after every free block has been laid down
+      for (var bh = Math.max(Math.floor(x.win.start), HMIN); bh < Math.min(Math.ceil(x.win.end), HMAX); bh++) busy[bh - HMIN] = true;
+      return;
+    }
+    var pl = blockPlace(x.block, personId, x.ownerDate, viewer);
     if (pl) lab[pl.key] = pl.label;
     // floor/ceil, not a bare clip -- a zone whose offset isn't a whole
     // number of hours (India, parts of Australia...) would otherwise
@@ -1035,6 +1051,7 @@ function hourDetail(personId, date, viewer){
       if (L >= lv[h - HMIN]) { lv[h - HMIN] = L; ar[h - HMIN] = pl ? pl.key : null; }   // the more available block wins the hour
     }
   });
+  for (var bi = 0; bi < busy.length; bi++) if (busy[bi]) { lv[bi] = 0; ar[bi] = null; }   // busy beats free
   return { lv:lv, ar:ar, lab:lab };
 }
 function hourStates(personId, date, viewer){ return hourDetail(personId, date, viewer).lv; }
@@ -1044,7 +1061,8 @@ function placeLabelFor(personId, date, viewer){
   var seen = {}, out = [], trav = false, rem = false, alsoRem = false;
   blocksOnViewerDate(personId, date, viewer).forEach(function(x){
     var b = x.block, pl = blockPlace(b, personId, x.ownerDate, viewer);
-    if (b.remote) { rem = true; return; }                            // no location at all -- nothing to show a base for
+    if (blockLevel(b) === 0) return;   // busy time isn't a place anyone is offering
+    if (b.remote) { rem = true; return; }                           // no location at all -- nothing to show a base for
     if (b.travel || b.remoteAlso) {                                  // still show where they're based, if they share it
       if (b.travel) trav = true;
       if (b.remoteAlso) alsoRem = true;
@@ -1421,12 +1439,13 @@ function renderDaySheet(){
   });
 
   // --- the viewer's own blocks for this day, and a way to add one ---
-  var mine = viewer.blocks.filter(function(b){ return blockApplies(b, date); });
+  var mine = viewer.blocks.filter(function(b){ return blockLevel(b) !== 0 && blockApplies(b, date); });
+  var busyMine = viewer.blocks.filter(function(b){ return blockLevel(b) === 0 && blockRecurs(b, date); });
   // Recurs here but was pulled out of just this one date -- a plan
   // consuming it, or a manual "not available this [day]" (something
   // off-app came up). Shown separately so it reads as "still here,
   // just not today" rather than silently vanishing from the list.
-  var cancelledMine = viewer.blocks.filter(function(b){ return blockRecurs(b, date) && isCancelledOn(b, date); });
+  var cancelledMine = viewer.blocks.filter(function(b){ return blockLevel(b) !== 0 && blockRecurs(b, date) && isCancelledOn(b, date); });
   html += '<div class="sec">Your free time</div>';
   html += mine.length ? mine.map(function(b){
     return '<div class="blockrow"><span>' + fmtRange(b.start, b.end) + (b.level === 'open' ? ' <b style="font-weight:700">open</b>' : '')
@@ -1443,6 +1462,17 @@ function renderDaySheet(){
       + '<button class="btn small" data-uncancel-date="' + b.id + '">Make available again</button></div>';
   }).join('');
 
+  // Work / busy times: they close out any free time that overlaps them.
+  if (busyMine.length) {
+    html += '<div class="sec">Busy (work &amp; appointments)</div>' + busyMine.map(function(b){
+      var off = isCancelledOn(b, date);
+      return '<div class="blockrow"' + (off ? ' style="opacity:0.6"' : '') + '><span>' + fmtRange(b.start, b.end)
+        + ' <span style="color:var(--soft)">' + (off ? 'off this day' : 'closed out') + (b.repeat === 'weekly' ? ', every ' + WEEKDAYS[wdMon0(b.date)] : '') + '</span></span>'
+        + (b.repeat === 'weekly' ? '<button class="btn small" data-busy-toggle="' + b.id + '">' + (off ? 'Busy again' : 'Not this ' + WEEKDAYS[wdMon0(date)].slice(0, 3)) + '</button>' : '')
+        + '<button class="btn small danger" data-del="' + b.id + '">' + (b.repeat === 'weekly' ? 'Remove series' : 'Remove') + '</button></div>';
+    }).join('');
+  }
+  html += '<button class="btn ghost" id="work-open" style="width:100%;margin-top:8px">Work &amp; busy times…</button>';
   if (an.best.size >= 2) html += leftOutHtml(an.best.who, winH);
   html += '<button class="btn ghost" id="sheet-close" style="width:100%;margin-top:14px">Done</button>';
 
@@ -1450,6 +1480,14 @@ function renderDaySheet(){
   card.innerHTML = html;
 
   document.getElementById('sheet-close').addEventListener('click', closeSheet);
+  document.getElementById('work-open').addEventListener('click', function(){ renderWork('weekly'); });
+  card.querySelectorAll('[data-busy-toggle]').forEach(function(b){
+    b.addEventListener('click', function(){
+      var blk = viewer.blocks.filter(function(x){ return x.id === b.dataset.busyToggle; })[0];
+      if (blk) { if (isCancelledOn(blk, date)) uncancelBlockDate(blk, date); else cancelBlockDate(blk, date); syncBlockUpsert(blk); }
+      renderDaySheet(); renderCalendar();
+    });
+  });
   bindDaySheetLocal(date);
   var setup = document.getElementById('setup-btn');
   if (setup) setup.addEventListener('click', function(){
@@ -2180,6 +2218,260 @@ function renderPlans(){
     });
   });
 }
+
+/* ---------------- WORK & BUSY TIMES ---------------- */
+// Work hours (typed in, or imported from a calendar/CSV file) are stored as
+// blocks with level:'busy'. They don't offer anything -- they CLOSE OUT any
+// free time that overlaps (see hourDetail). Friends see you as not free then,
+// never why. Ids carry a prefix so a re-import/re-save can replace just its
+// own earlier blocks: work_wk_ = typed weekly hours, work_im_ = imported.
+function busyBlocks(prefix){
+  var me = personById(viewerId);
+  return me ? me.blocks.filter(function(b){ return blockLevel(b) === 0 && (!prefix || String(b.id).indexOf(prefix) === 0); }) : [];
+}
+function syncBlocksDelete(ids){
+  if (!ids.length || !(window.AS && AS.auth)) return;
+  var sb = AS.auth.client(); if (!sb) return;
+  withTimeout(sb.from('friend_calendar_blocks').delete().in('id', ids), 10000).then(function(r){
+    if (r.error) console.warn('[friend-calendar] block delete failed:', r.error.message);
+  });
+}
+function removeBusy(prefix){
+  var me = personById(viewerId), gone = busyBlocks(prefix).map(function(b){ return b.id; });
+  me.blocks = me.blocks.filter(function(b){ return gone.indexOf(b.id) === -1; });
+  syncBlocksDelete(gone);
+  return gone.length;
+}
+function addBusy(list){
+  var me = personById(viewerId);
+  list.forEach(function(b){ me.blocks.push(b); });
+  for (var i = 0; i < list.length; i += 150) syncBlocksUpsert(list.slice(i, i + 150));
+}
+function busyBlock(prefix, date, s, e, weeklyUntil){
+  return { id:newId(prefix), date:date, start:s, end:e, repeat:weeklyUntil === undefined ? 'none' : 'weekly',
+    repeatUntil:weeklyUntil || null, level:'busy', visibleTo:'all', area:'', travel:false, remote:false, remoteAlso:false, cancelledDates:[] };
+}
+
+// ---- file parsing ----
+function utcToWall(ms, tz){
+  var d = new Date(ms + tzOffsetMinutesAt(tz, ms) * 60000);
+  return { date:d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate()), hour:d.getUTCHours() + d.getUTCMinutes() / 60 };
+}
+function validTz(tz){ try { new Intl.DateTimeFormat('en-US', { timeZone:tz }); return true; } catch (e) { return false; } }
+// An iCalendar date-time -> {date, hour, tz} in its own zone, or {allDay, date}.
+function icsParseDt(val, params, myTz){
+  val = String(val || '').trim();
+  if (/^\d{8}$/.test(val)) return { allDay:true, date:val.slice(0, 4) + '-' + val.slice(4, 6) + '-' + val.slice(6, 8) };
+  var m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?(Z)?$/.exec(val);
+  if (!m) return null;
+  var date = m[1] + '-' + m[2] + '-' + m[3], hour = (+m[4]) + (+m[5]) / 60;
+  if (m[7]) return { date:date, hour:hour, tz:'UTC' };
+  var tzm = /TZID=([^;:]+)/i.exec(params || ''), tz = tzm && validTz(tzm[1].replace(/^"|"$/g, '')) ? tzm[1].replace(/^"|"$/g, '') : myTz;   // unknown zone names (Windows-style) are read as your own zone
+  return { date:date, hour:hour, tz:tz };
+}
+function icsToMine(dt, myTz){   // -> wall {date, hour} in the viewer's zone
+  if (dt.tz === myTz) return { date:dt.date, hour:dt.hour };
+  return utcToWall(zonedWallClockToUtc(dt.date, dt.hour, dt.tz), myTz);
+}
+var _ICS_DAYS = { MO:0, TU:1, WE:2, TH:3, FR:4, SA:5, SU:6 };
+function daysBetweenStr(a, b){ return Math.round((parseDate(b) - parseDate(a)) / 86400000); }
+// Whole-hour windows per day for one stretch (start..end wall times, may span midnight).
+function spanToDays(s, e, out, horizonStart, horizonEnd){
+  for (var d = s.date, guard = 0; d <= e.date && guard < 40; d = addDaysStr(d, 1), guard++) {
+    var from = d === s.date ? s.hour : 0, to = d === e.date ? e.hour : 24;
+    var a = Math.max(Math.floor(from), HMIN), b = Math.min(Math.ceil(to), HMAX);
+    if (b > a && d >= horizonStart && d <= horizonEnd) out.push({ date:d, start:a, end:b });
+  }
+}
+function parseIcsBusy(text){
+  var myTz = tzOf(viewerId), horizonStart = TODAY, horizonEnd = addDaysStr(TODAY, 180);
+  var lines = String(text).replace(/\r\n/g, '\n').replace(/\n[ \t]/g, '').split('\n');
+  var out = [], skippedAllDay = 0, skippedFree = 0, skippedOther = 0, ev = null;
+  function finish(){
+    if (!ev || !ev.start) return;
+    if (/CANCELLED/i.test(ev.status || '')) { return; }
+    if (/TRANSPARENT/i.test(ev.transp || '')) { skippedFree++; return; }
+    var st = icsParseDt(ev.start.v, ev.start.p, myTz);
+    if (!st) { skippedOther++; return; }
+    if (st.allDay) { skippedAllDay++; return; }
+    var en = ev.end ? icsParseDt(ev.end.v, ev.end.p, myTz) : null;
+    if (!en || en.allDay) en = { date:st.date, hour:st.hour + 1, tz:st.tz };
+    var spanDays = daysBetweenStr(st.date, en.date);
+    var rule = {};
+    if (ev.rrule) ev.rrule.split(';').forEach(function(kv){ var p = kv.split('='); rule[p[0].toUpperCase()] = p[1]; });
+    var starts = [st.date];
+    if (rule.FREQ) {
+      if (rule.FREQ !== 'DAILY' && rule.FREQ !== 'WEEKLY') { skippedOther++; }
+      else {
+        var interval = Math.max(1, +rule.INTERVAL || 1), count = +rule.COUNT || 0, until = null;
+        if (rule.UNTIL) { var u = String(rule.UNTIL).replace(/[^0-9]/g, ''); if (u.length >= 8) until = u.slice(0, 4) + '-' + u.slice(4, 6) + '-' + u.slice(6, 8); }
+        var by = rule.BYDAY ? rule.BYDAY.split(',').map(function(x){ return _ICS_DAYS[x.slice(-2).toUpperCase()]; }).filter(function(x){ return x !== undefined; }) : [];
+        if (rule.FREQ === 'WEEKLY' && !by.length) by = [wdMon0(st.date)];
+        var monday = addDaysStr(st.date, -wdMon0(st.date)), n = 0;
+        starts = [];
+        for (var d = st.date, g = 0; g < 400 && d <= horizonEnd; d = addDaysStr(d, 1), g++) {
+          if (until && d > until) break;
+          var ok;
+          if (rule.FREQ === 'DAILY') ok = daysBetweenStr(st.date, d) % interval === 0;
+          else ok = by.indexOf(wdMon0(d)) !== -1 && Math.floor(daysBetweenStr(monday, d) / 7) % interval === 0;
+          if (!ok) continue;
+          n++;
+          if (count && n > count) break;
+          if (ev.ex.indexOf(d) === -1) starts.push(d);
+        }
+      }
+    }
+    starts.forEach(function(d0){
+      var s = icsToMine({ date:d0, hour:st.hour, tz:st.tz }, myTz), e = icsToMine({ date:addDaysStr(d0, spanDays), hour:en.hour, tz:en.tz }, myTz);
+      spanToDays(s, e, out, horizonStart, horizonEnd);
+    });
+  }
+  lines.forEach(function(raw){
+    if (/^BEGIN:VEVENT/i.test(raw)) { ev = { ex:[] }; return; }
+    if (/^END:VEVENT/i.test(raw)) { finish(); ev = null; return; }
+    if (!ev) return;
+    var i = raw.indexOf(':'); if (i < 1) return;
+    var head = raw.slice(0, i), val = raw.slice(i + 1), semi = head.indexOf(';');
+    var name = (semi === -1 ? head : head.slice(0, semi)).toUpperCase(), params = semi === -1 ? '' : head.slice(semi + 1);
+    if (name === 'DTSTART') ev.start = { v:val, p:params };
+    else if (name === 'DTEND') ev.end = { v:val, p:params };
+    else if (name === 'RRULE') ev.rrule = val;
+    else if (name === 'STATUS') ev.status = val;
+    else if (name === 'TRANSP') ev.transp = val;
+    else if (name === 'EXDATE') val.split(',').forEach(function(x){ var q = icsParseDt(x, params, myTz); if (q) ev.ex.push(q.date); });
+  });
+  return { items:out, skippedAllDay:skippedAllDay, skippedFree:skippedFree, skippedOther:skippedOther };
+}
+function parseClockTok(h, m, ap){
+  h = +h; m = m ? +m : 0; ap = (ap || '').toLowerCase().replace(/\./g, '');
+  if (ap === 'pm' && h < 12) h += 12; if (ap === 'am' && h === 12) h = 0;
+  return h + m / 60;
+}
+// CSV / text: one shift per line -- a date and two times, in any common layout
+// ("2026-12-01, 9:00, 17:30", "12/1/2026;9am;5pm", "Dec 1 ...").
+function parseCsvBusy(text){
+  var out = [], skipped = 0, horizonStart = TODAY, horizonEnd = addDaysStr(TODAY, 365);
+  String(text).split(/\r?\n/).forEach(function(line){
+    if (!/\d/.test(line)) return;   // blank lines and a header row (no digits) aren't "unreadable"
+    var dm = /(\d{4})-(\d{1,2})-(\d{1,2})/.exec(line), date = null, rest = line;
+    if (dm) { date = dm[1] + '-' + pad(+dm[2]) + '-' + pad(+dm[3]); rest = line.replace(dm[0], ' '); }
+    else {
+      var sm = /(\d{1,2})\/(\d{1,2})\/(\d{2,4})/.exec(line);
+      if (sm) {
+        var a = +sm[1], b = +sm[2], y = +sm[3]; if (y < 100) y += 2000;
+        var mo = a > 12 ? b : a, da = a > 12 ? a : b;   // US month/day unless the first number can't be a month
+        date = y + '-' + pad(mo) + '-' + pad(da); rest = line.replace(sm[0], ' ');
+      }
+    }
+    if (!date) { skipped++; return; }
+    var times = [], re = /(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?/ig, m;
+    while ((m = re.exec(rest)) !== null) { if (m[2] || m[3]) times.push(parseClockTok(m[1], m[2], m[3])); }
+    if (times.length < 2) { skipped++; return; }
+    var s = times[0], e = times[1];
+    if (e <= s) e = 24;   // overnight: closes out to midnight on that date
+    spanToDays({ date:date, hour:s }, { date:date, hour:e }, out, horizonStart, horizonEnd);
+  });
+  return { items:out, skippedAllDay:0, skippedFree:0, skippedOther:skipped };
+}
+
+// ---- the sheet ----
+var _workImport = null;
+function renderWork(tab){
+  tab = tab || 'weekly';
+  var card = document.getElementById('sheet-card');
+  var nBusy = busyBlocks('').length;
+  var tabs = '<div class="chips-row"><button class="chip' + (tab === 'weekly' ? ' on' : '') + '" data-wtab="weekly">Weekly hours</button>'
+    + '<button class="chip' + (tab === 'import' ? ' on' : '') + '" data-wtab="import">Import a file</button></div>';
+  var h = '<h4>Work &amp; busy times</h4>'
+    + '<div style="font-size:13px;color:var(--soft);margin-bottom:10px">Anything you add here is taken out of your free time, so friends only see you as free when you really are. They see that you’re not free then — never why.</div>' + tabs;
+  if (tab === 'weekly') {
+    var existing = {};
+    busyBlocks('work_wk_').forEach(function(b){ existing[wdMon0(b.date)] = b; });
+    var opts = function(sel){ var o = ''; for (var x = HMIN; x <= HMAX; x++) o += '<option value="' + x + '"' + (x === sel ? ' selected' : '') + '>' + hourLabel(x) + '</option>'; return o; };
+    h += '<div style="font-size:13px;color:var(--soft);margin:6px 0 8px">Tick the days you work and set the hours. It repeats every week.</div>';
+    for (var i = 0; i < 7; i++) {
+      var ex = existing[i];
+      h += '<div class="wkrow"><label class="wkday"><input type="checkbox" class="wk-on" data-d="' + i + '"' + (ex ? ' checked' : '') + '/> ' + WEEKDAYS[i] + '</label>'
+        + '<span class="wkt"><select class="wk-s" data-d="' + i + '">' + opts(ex ? ex.start : 9) + '</select> to <select class="wk-e" data-d="' + i + '">' + opts(ex ? ex.end : 17) + '</select></span></div>';
+    }
+    h += '<div class="field" style="margin-top:10px"><label>How long?</label><select id="wk-len"><option value="0">Until I change it</option><option value="4">Next 4 weeks</option><option value="8">Next 8 weeks</option><option value="12">Next 12 weeks</option></select></div>'
+      + '<div class="form-error" id="wk-error"></div>'
+      + '<button class="btn" id="wk-save" style="width:100%">Save work hours</button>';
+  } else if (!_workImport) {
+    h += '<div style="font-size:13px;color:var(--soft);margin:6px 0 10px">Upload your schedule as a calendar file (<b>.ics</b> — what Google Calendar, Apple Calendar, Outlook and most scheduling apps export) or a simple <b>.csv</b> with a date and start/end time on each line. Everything in it is closed out of your free time.</div>'
+      + '<input type="file" id="wk-file" accept=".ics,.csv,.txt,text/calendar,text/csv,text/plain" style="width:100%;margin-bottom:8px"/>'
+      + '<div id="wk-msg" style="font-size:13px;color:var(--soft)"></div>'
+      + '<div style="font-size:12px;color:var(--soft);margin-top:10px">A photo or PDF of a schedule can’t be read yet. Export it as a calendar file, or type your hours in the Weekly tab.</div>';
+  } else {
+    var it = _workImport, days = {}; it.items.forEach(function(x){ days[x.date] = 1; });
+    var dates = Object.keys(days).sort();
+    h += '<div style="font-size:14px;margin:8px 0"><b>' + it.items.length + ' time' + (it.items.length === 1 ? '' : 's') + '</b> on ' + dates.length + ' day' + (dates.length === 1 ? '' : 's')
+      + (dates.length ? ' (' + esc(longDate(dates[0])) + ' to ' + esc(longDate(dates[dates.length - 1])) + ')' : '') + ' found in <i>' + esc(it.name) + '</i>.</div>'
+      + it.items.slice(0, 6).map(function(x){ return '<div class="blockrow"><span>' + esc(longDate(x.date)) + ' <span style="color:var(--soft)">' + fmtRange(x.start, x.end) + '</span></span></div>'; }).join('')
+      + (it.items.length > 6 ? '<div style="font-size:12px;color:var(--soft);padding:4px 0">…and ' + (it.items.length - 6) + ' more</div>' : '')
+      + '<div style="font-size:12px;color:var(--soft);margin:8px 0">Rounded out to whole hours' + (it.skippedAllDay ? '; skipped ' + it.skippedAllDay + ' all-day item' + (it.skippedAllDay === 1 ? '' : 's') : '')
+      + (it.skippedFree ? '; skipped ' + it.skippedFree + ' marked “free”' : '') + (it.skippedOther ? '; couldn’t read ' + it.skippedOther : '') + '. Only the next 6 months are used.</div>'
+      + (it.items.length ? '<label class="check"><input type="checkbox" id="wk-replace" checked/> Replace my earlier imports</label><button class="btn" id="wk-apply" style="width:100%;margin-top:8px">Close out these times</button>' : '<div class="form-error">Nothing usable found in that file.</div>')
+      + '<button class="btn ghost" id="wk-other" style="width:100%;margin-top:6px">Choose a different file</button>';
+  }
+  if (nBusy) h += '<button class="btn ghost danger" id="wk-clear" style="width:100%;margin-top:12px">Clear all my work &amp; busy times (' + nBusy + ')</button>';
+  h += '<button class="btn ghost" id="wk-done" style="width:100%;margin-top:6px">Done</button>';
+  card.innerHTML = h; openSheet();
+  document.getElementById('wk-done').addEventListener('click', function(){ _workImport = null; closeSheet(); renderAll(); });
+  card.querySelectorAll('[data-wtab]').forEach(function(b){ b.addEventListener('click', function(){ _workImport = null; renderWork(b.dataset.wtab); }); });
+  var clr = document.getElementById('wk-clear');
+  if (clr) clr.addEventListener('click', function(){
+    if (!window.confirm('Remove all ' + nBusy + ' work & busy times? Your free time goes back to how you set it.')) return;
+    removeBusy(''); _workImport = null; renderAll(); renderWork(tab);
+  });
+  if (tab === 'weekly') document.getElementById('wk-save').addEventListener('click', function(){
+    var err = document.getElementById('wk-error'), made = [], weeks = +document.getElementById('wk-len').value;
+    err.textContent = '';
+    var bad = false;
+    card.querySelectorAll('.wk-on').forEach(function(c){
+      if (!c.checked) return;
+      var d = +c.dataset.d, s = +card.querySelector('.wk-s[data-d="' + d + '"]').value, e = +card.querySelector('.wk-e[data-d="' + d + '"]').value;
+      if (e <= s) { bad = true; return; }
+      var first = addDaysStr(TODAY, (d - wdMon0(TODAY) + 7) % 7);   // the next such weekday, today included
+      made.push(busyBlock('work_wk_', first, s, e, weeks ? addDaysStr(TODAY, weeks * 7) : ''));
+    });
+    if (bad) { err.textContent = 'Each day needs an end time after its start (shifts that run past midnight: end at 12am).'; return; }
+    removeBusy('work_wk_');
+    if (made.length) addBusy(made);
+    showToast(made.length ? 'Work hours saved — those times are closed out' : 'Work hours cleared');
+    renderAll(); renderWork('weekly');
+  });
+  var file = document.getElementById('wk-file');
+  if (file) file.addEventListener('change', function(){
+    var f = file.files && file.files[0], msg = document.getElementById('wk-msg');
+    if (!f) return;
+    if (f.size > 3 * 1024 * 1024) { msg.textContent = 'That file is too big (3 MB max).'; return; }
+    if (/\.(pdf|png|jpe?g|heic|docx?|xlsx?)$/i.test(f.name)) { msg.textContent = 'That kind of file can’t be read yet — export it as .ics or .csv.'; return; }
+    msg.textContent = 'Reading…';
+    var rd = new FileReader();
+    rd.onerror = function(){ msg.textContent = 'Couldn’t read that file.'; };
+    rd.onload = function(){
+      var text = String(rd.result || ''), res;
+      try { res = /BEGIN:VCALENDAR/i.test(text) ? parseIcsBusy(text) : parseCsvBusy(text); }
+      catch (e) { msg.textContent = 'Couldn’t make sense of that file.'; return; }
+      res.name = f.name; _workImport = res; renderWork('import');
+    };
+    rd.readAsText(f);
+  });
+  var other = document.getElementById('wk-other');
+  if (other) other.addEventListener('click', function(){ _workImport = null; renderWork('import'); });
+  var apply = document.getElementById('wk-apply');
+  if (apply) apply.addEventListener('click', function(){
+    var it = _workImport, seen = {}, made = [];
+    if (document.getElementById('wk-replace').checked) removeBusy('work_im_');
+    it.items.forEach(function(x){ var k = x.date + '|' + x.start + '|' + x.end; if (seen[k]) return; seen[k] = 1; made.push(busyBlock('work_im_', x.date, x.start, x.end)); });
+    if (made.length > 600) made = made.slice(0, 600);
+    addBusy(made); _workImport = null;
+    showToast(made.length + ' times closed out of your free time');
+    renderAll(); renderWork('import');
+  });
+}
+document.getElementById('work-btn').addEventListener('click', function(){ _workImport = null; renderWork('weekly'); });
 
 /* ---------------- FRIENDS LIST ---------------- */
 // Nicknames are only ever offered for a friend whose profile has no name at
