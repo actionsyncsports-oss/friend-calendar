@@ -205,7 +205,7 @@
   .lvbtn.av-allergy{background:var(--busy);color:#fff} .lvbtn.av-avoid{background:#f1d9d4} .lvbtn.av-prefer{background:#ece8dc}
   .sheet-card .chip{margin:0 8px 4px 0}
   /* Friends list + people pickers */
-  .fr-search{width:100%;box-sizing:border-box;border:1.5px solid var(--rule);border-radius:22px;background:var(--card);font:500 15px var(--sans);color:var(--ink);padding:10px 16px;margin:2px 0 10px}
+  .field input.fr-search, .fr-search{width:100%;box-sizing:border-box;border:1.5px solid var(--rule);border-radius:22px;background:var(--card);font:500 15px var(--sans);color:var(--ink);padding:10px 16px;margin:2px 0 10px}
   .fr-pills{display:flex;gap:6px;overflow-x:auto;padding-bottom:8px;margin-bottom:4px;-webkit-overflow-scrolling:touch}
   .fr-pill{flex:none;border:1.5px solid var(--rule);background:var(--card);color:var(--soft);border-radius:18px;padding:5px 13px;font:600 13px var(--sans);cursor:pointer}
   .fr-pill.on{background:var(--ink);border-color:var(--ink);color:#fff}
@@ -230,6 +230,12 @@
   .prow .av{--s:32px;flex:none;font-size:14px}
   .prow .pn{font:600 14px var(--sans);color:var(--ink)}
   .prow .pa{font-size:12px;color:var(--soft)}
+  .spbox{max-height:230px;overflow-y:auto;border:1.5px solid var(--rule);border-radius:12px;padding:6px 10px 10px;background:var(--card);-webkit-overflow-scrolling:touch}
+  .spcat-h{font:700 11px var(--sans);letter-spacing:.06em;text-transform:uppercase;color:var(--soft);margin:10px 0 5px}
+  .field .spchip{display:inline-flex;font-size:13px;margin-bottom:6px;align-items:center;gap:6px;border:1.5px solid var(--rule);border-radius:18px;padding:5px 11px;margin:0 6px 6px 0;font:500 13px var(--sans);color:var(--ink);cursor:pointer;background:var(--paper)}
+  .field .spchip input{position:absolute;opacity:0;pointer-events:none;width:0;height:0}
+  .field .spchip:has(input:checked){background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
+  .spchip:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
   .trow{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 0;border-bottom:1px solid var(--rule)}
   .trow .tn{font-size:15px}
   .lv{display:inline-flex;gap:2px}
@@ -1933,7 +1939,7 @@ function renderPlanForm(date, start, end, whoIds, openIds, place){
 function spotSuggestions(area, item){
   var out = [], town = townOf(area || '');
   if (!town) return out;
-  SPOTS.forEach(function(sp){ if (townOf(sp.area) === town && (!item || !sp.item || sp.item === item) && out.indexOf(sp.name) === -1) out.push(sp.name); });
+  SPOTS.forEach(function(sp){ if (townOf(sp.area) === town && (!item || !spotItems(sp).length || spotItems(sp).indexOf(item) !== -1) && out.indexOf(sp.name) === -1) out.push(sp.name); });
   if (item) Object.keys(OSM.res).forEach(function(k){
     var r = OSM.res[k]; if (!r || r.status !== 'done' || !r.byKey || !r.byKey[item] || (r.area && townOf(r.area) !== town)) return;
     r.byKey[item].slice(0, 4).forEach(function(it){ if (out.indexOf(it.name) === -1) out.push(it.name); });
@@ -3082,7 +3088,17 @@ function currentArea(){ return searchArea !== null ? searchArea : ((openDate && 
 function mapsLink(query){ return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(query); }
 function safeUrl(u){ u = String(u || '').trim(); return /^https?:\/\/[^\s]+$/i.test(u) ? u : ''; }
 
-var SPOTS = [];   // { id, name, area, item (catalog key or ''), note, url, by }
+var SPOTS = [];   // { id, name, area, items:[catalog keys] (item = first, kept for older code), note, url, by }
+// A spot can be good for several things (burgers AND beer). Older spots only
+// have the single `item`, so every reader goes through this.
+function spotItems(sp){ return Array.isArray(sp.items) ? sp.items : (sp.item ? [sp.item] : []); }
+function spotLabel(sp){ return spotItems(sp).map(catLabel).join(', '); }
+// How well a spot matches the ranked picks: its best (lowest) position, or 99.
+function spotRank(sp, picks){
+  var best = 99;
+  spotItems(sp).forEach(function(k){ var i = picks.indexOf(k); if (i !== -1 && i < best) best = i; });
+  return best;
+}
 var EVENTS = [];   // { id, title, date, start, end, area, item, note, url, by, visibleTo:'all'|[ids], interested:{id:true} }
 function eventVisible(ev, viewer){ return ev.by === viewer || ev.visibleTo === 'all' || ev.visibleTo.indexOf(viewer) !== -1; }
 function eventsOn(date, viewer){ return EVENTS.filter(function(ev){ return ev.date === date && eventVisible(ev, viewer || viewerId); }); }
@@ -3098,12 +3114,12 @@ function nearbyHtml(t, ids){
   var h = '<div class="nearby"><b>Nearby</b> <span style="color:var(--soft)">near</span> <input type="text" id="area-input" value="' + esc(area) + '" maxlength="60" aria-label="Search area" placeholder="town"/>';
   var chips = areaChips(ids).filter(function(a){ return townOf(a) !== townOf(area); });
   if (chips.length) h += ' ' + chips.map(function(a){ return '<button class="chip" data-area="' + esc(a) + '">' + esc(a) + '</button>'; }).join('');
-  var spots = townOf(area) ? SPOTS.filter(function(sp){ return townOf(sp.area) === townOf(area) && (!sp.item || picks.indexOf(sp.item) !== -1); }) : [];
-  spots.sort(function(a, b){ return (picks.indexOf(a.item) === -1 ? 99 : picks.indexOf(a.item)) - (picks.indexOf(b.item) === -1 ? 99 : picks.indexOf(b.item)); });
+  var spots = townOf(area) ? SPOTS.filter(function(sp){ return townOf(sp.area) === townOf(area) && (!spotItems(sp).length || spotRank(sp, picks) !== 99); }) : [];
+  spots.sort(function(a, b){ return spotRank(a, picks) - spotRank(b, picks); });
   spots.slice(0, 4).forEach(function(sp){
     var u = safeUrl(sp.url);
     h += '<div class="spot"><span class="sn">' + (u ? '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + esc(sp.name) + '</a>' : esc(sp.name)) + '</span>'
-      + (sp.item ? ' <span style="color:var(--soft)">for ' + esc(catLabel(sp.item)) + '</span>' : '') + '<div style="color:var(--soft)">' + esc(sp.note) + ' Added by ' + esc(personById(sp.by).name) + '.</div></div>';
+      + (spotItems(sp).length ? ' <span style="color:var(--soft)">for ' + esc(spotLabel(sp)) + '</span>' : '') + '<div style="color:var(--soft)">' + esc(sp.note) + ' Added by ' + esc(personById(sp.by).name) + '.</div></div>';
   });
   if (!spots.length && townOf(area)) h += '<div style="color:var(--soft);margin-top:4px">No saved spots in ' + esc(area) + ' for these yet.</div>';
   if (!townOf(area)) h += '<div style="color:var(--soft);margin-top:4px">Add your area in My profile, or type a town above.</div>';
@@ -3817,15 +3833,22 @@ function renderLocal(tab){
     html += spots.length ? spots.map(function(sp){
       var u = safeUrl(sp.url);
       return '<div class="evrow"><div class="et">' + (u ? '<a href="' + esc(u) + '" target="_blank" rel="noopener noreferrer">' + esc(sp.name) + '</a>' : esc(sp.name)) + '</div>'
-        + '<div class="em">' + esc(sp.area) + (sp.item ? ', for ' + esc(catLabel(sp.item)) : '') + '. Added by ' + esc(personById(sp.by).name) + '.</div>'
+        + '<div class="em">' + esc(sp.area) + (spotItems(sp).length ? ', for ' + esc(spotLabel(sp)) : '') + '. Added by ' + esc(personById(sp.by).name) + '.</div>'
         + (sp.note ? '<div class="em">' + esc(sp.note) + '</div>' : '')
         + (sp.by === viewerId ? '<div class="acts"><button class="btn small danger" data-sp-del="' + sp.id + '">Remove</button></div>' : '') + '</div>';
     }).join('') : '<div style="color:var(--soft)">Nothing saved for this area yet.</div>';
     html += '<div class="sec">Add a spot</div>'
       + '<div class="field"><label>Name</label><input type="text" id="sp-name" maxlength="80"/></div>'
       + '<div class="field"><label>Town</label><input type="text" id="sp-area" maxlength="60" value="' + esc(currentArea()) + '"/></div>'
-      + '<div class="field"><label>Good for</label><select id="sp-item"><option value="">Anything</option>'
-        + CATALOG.filter(function(c){ return c[2] !== 'vibe'; }).map(function(c){ return '<option value="' + c[0] + '">' + esc(c[1]) + '</option>'; }).join('') + '</select></div>'
+      + '<div class="field"><label>Good for <span style="font-weight:400;color:var(--soft)">— tick as many as fit, or none for anything</span></label>'
+        + '<input type="text" id="sp-find" placeholder="Search (burgers, beer, coffee…)" autocomplete="off" class="fr-search" style="margin-bottom:6px"/>'
+        + '<div id="sp-picked" style="font-size:12px;color:var(--accent);min-height:16px;margin-bottom:4px"></div>'
+        + '<div id="sp-items" class="spbox">' + CATS.filter(function(c){ return c[0] !== 'vibe'; }).map(function(cat){
+            return '<div class="spcat" data-cat="' + cat[0] + '"><div class="spcat-h">' + esc(cat[1]) + '</div>'
+              + CATALOG.filter(function(c){ return c[2] === cat[0]; }).map(function(c){
+                  return '<label class="spchip" data-lbl="' + esc(c[1].toLowerCase()) + '"><input type="checkbox" class="sp-item" value="' + esc(c[0]) + '"/>' + esc(c[1]) + '</label>';
+                }).join('') + '</div>';
+          }).join('') + '</div></div>'
       + '<div class="field"><label>Why it’s good (optional)</label><input type="text" id="sp-note" maxlength="140"/></div>'
       + '<div class="field"><label>Link (optional)</label><input type="text" id="sp-url" placeholder="https://" maxlength="300"/></div>'
       + '<div class="form-error" id="sp-error"></div><button class="btn" id="sp-save">Add spot</button>';
@@ -3843,13 +3866,30 @@ function renderLocal(tab){
   var more = document.getElementById('ev-more'); if (more) more.addEventListener('click', function(){ evShowAll = true; renderLocal('events'); });
   bindEventSave(function(){ renderLocal('events'); renderCalendar(); renderBadges(); });
   if (tab === 'sources') bindSources();
+  var spBox = document.getElementById('sp-items');
+  if (spBox) {
+    var spFind = document.getElementById('sp-find'), spPicked = document.getElementById('sp-picked');
+    var showPicked = function(){
+      var names = Array.prototype.map.call(spBox.querySelectorAll('.sp-item:checked'), function(c){ return catLabel(c.value); });
+      spPicked.textContent = names.length ? 'Good for: ' + names.join(', ') : '';
+    };
+    spBox.addEventListener('change', showPicked);
+    spFind.addEventListener('input', function(){
+      var q = spFind.value.trim().toLowerCase();
+      spBox.querySelectorAll('.spchip').forEach(function(l){ l.style.display = (!q || l.dataset.lbl.indexOf(q) !== -1) ? '' : 'none'; });
+      spBox.querySelectorAll('.spcat').forEach(function(c){
+        c.style.display = Array.prototype.some.call(c.querySelectorAll('.spchip'), function(l){ return l.style.display !== 'none'; }) ? '' : 'none';
+      });
+    });
+  }
   var spSave = document.getElementById('sp-save');
   if (spSave) spSave.addEventListener('click', function(){
     var err = document.getElementById('sp-error'), name = document.getElementById('sp-name').value.trim(), url = document.getElementById('sp-url').value.trim();
     if (!name) { err.textContent = 'Give it a name.'; return; }
     if (!document.getElementById('sp-area').value.trim()) { err.textContent = 'Add the town so it shows up for the right people.'; return; }
     if (url && !safeUrl(url)) { err.textContent = 'The link should start with http:// or https://.'; return; }
-    SPOTS.push({ id:newId('sp'), name:name, area:document.getElementById('sp-area').value.trim(), item:document.getElementById('sp-item').value, note:document.getElementById('sp-note').value.trim(), url:safeUrl(url), by:viewerId });
+    var spItems = Array.prototype.map.call(document.querySelectorAll('.sp-item:checked'), function(c){ return c.value; });
+    SPOTS.push({ id:newId('sp'), name:name, area:document.getElementById('sp-area').value.trim(), items:spItems, item:spItems[0] || '', note:document.getElementById('sp-note').value.trim(), url:safeUrl(url), by:viewerId });
     renderLocal('spots');
   });
 }
