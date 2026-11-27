@@ -20,6 +20,11 @@
     var dark = t === 'dark' || (t !== 'light' && window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
     document.querySelector('meta[name="theme-color"]').setAttribute('content', dark ? '#111618' : '#f3f5f3');
   } catch (e) {}
+  // A group invite link (?join=<group>.<token>) is remembered here so it survives signing in or creating an account first.
+  try {
+    var jq = new URLSearchParams(location.search).get('join');
+    if (jq && /^[0-9a-f-]{36}\.[A-Za-z0-9_-]{16,64}$/i.test(jq)) localStorage.setItem('fc_pending_join', JSON.stringify({ v:jq, t:Date.now() }));
+  } catch (e) {}
 })();
 </script>
 <link rel="icon" type="image/png" href="/icons/icon-192.png"/>
@@ -317,6 +322,12 @@
   .setuprow.done .n{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
   .setuprow b{display:block;font:700 15px var(--sans)}
   .setuprow .d{font-size:12px;color:var(--soft);display:block;margin-top:1px}
+  #group-prompt{margin:0 18px}
+  #group-prompt .gp{border:1.5px solid var(--larch);background:var(--larch-bg);border-radius:14px;padding:10px 14px;margin:2px 0 8px;display:flex;align-items:center;gap:10px}
+  #group-prompt .gp b{display:block;font:700 14px var(--sans)}
+  #group-prompt .gp .d{font-size:12px;color:var(--soft)}
+  #group-prompt .gp .x{margin-left:2px;border:none;background:none;color:var(--soft);font-size:18px;cursor:pointer;padding:4px 6px}
+  .grplink{font-size:12px;word-break:break-all;color:var(--soft);background:var(--card);border:1.5px solid var(--rule);border-radius:10px;padding:8px 10px;margin:8px 0}
   .daynav{display:flex;align-items:center;gap:8px;margin-bottom:6px}
   .daynav h4{margin:0 !important;flex:1;text-align:center}
   .daynav button{flex:none;width:38px;height:38px;border-radius:50%;border:1.5px solid var(--rule);background:var(--card);color:var(--ink);font:400 22px/1 var(--sans);cursor:pointer;padding:0}
@@ -463,6 +474,7 @@
 
 <div id="filters"></div>
 <div id="setup-card"></div>
+<div id="group-prompt"></div>
 
 <div id="calwrap">
   <div id="calhead">
@@ -3349,6 +3361,123 @@ function renderMeButton(){
   b.innerHTML = avatarHtml(me, 30, { me:false });
 }
 
+/* ---------------- GROUP ADD (join a group = connect with everyone in it) ---------------- */
+// Joining a group is the consent: you and everyone else who has joined become friends in one step, instead of
+// each person adding each other person. Three ways in: the owner's invite link / QR, "you were added to a
+// group" (say yes), or the owner creating it. The database does the connecting (fc_group_connect / fc_group_join)
+// and never connects anyone who hasn't said yes.
+var GROUP_CONSENT = null;   // { groupId: true } for groups I've said yes to; null = the feature isn't set up in the database yet
+function loadGroupConsent(sb, myId){
+  return sb.from('friend_calendar_group_consent').select('group_id').eq('user_id', myId).then(function(r){
+    if (r.error) { GROUP_CONSENT = null; return; }
+    GROUP_CONSENT = {}; (r.data || []).forEach(function(x){ GROUP_CONSENT[x.group_id] = true; });
+  }, function(){ GROUP_CONSENT = null; });
+}
+function groupSkipped(g){ try { return !!localStorage.getItem('fc_grp_skip_' + g.id); } catch (e) { return false; } }
+function renderGroupPrompts(){
+  var el = document.getElementById('group-prompt'); if (!el) return;
+  if (!GROUP_CONSENT) { el.innerHTML = ''; return; }
+  var todo = GROUPS.filter(function(g){ return !GROUP_CONSENT[g.id] && !groupSkipped(g) && g.memberIds.filter(function(id){ return id !== viewerId; }).length > 0; });
+  el.innerHTML = todo.map(function(g, i){
+    var owner = g.ownerId === viewerId, o = personById(g.ownerId), others = g.memberIds.filter(function(id){ return id !== viewerId; }).length;
+    return '<div class="gp"><div style="flex:1;min-width:0"><b>' + (owner ? 'Connect everyone in “' + esc(g.name) + '”?' : esc(o ? o.name : 'Someone') + ' added you to “' + esc(g.name) + '”') + '</b>'
+      + '<span class="d">' + (owner ? 'Members who say yes get added to each other’s calendars.' : 'Say yes to share free time with the ' + others + ' other' + (others === 1 ? '' : 's') + ' in it.') + '</span></div>'
+      + '<button class="btn small" data-grp-yes="' + i + '">' + (owner ? 'Connect' : 'Yes') + '</button><button class="x" data-grp-no="' + i + '" aria-label="Not now">✕</button></div>';
+  }).join('');
+  el.querySelectorAll('[data-grp-yes]').forEach(function(b){ b.addEventListener('click', function(){ b.disabled = true; groupConnect(todo[Number(b.dataset.grpYes)]); }); });
+  el.querySelectorAll('[data-grp-no]').forEach(function(b){ b.addEventListener('click', function(){
+    try { localStorage.setItem('fc_grp_skip_' + todo[Number(b.dataset.grpNo)].id, '1'); } catch (e) {}
+    renderGroupPrompts();
+  }); });
+}
+function afterConnect(res, fallbackName){
+  if (!res || !res.ok) { showToast((res && res.error) || 'Couldn’t do that — try again.'); return Promise.resolve(); }
+  var n = res.connected || 0;
+  showToast(n ? 'You’re connected with ' + n + ' ' + (n === 1 ? 'person' : 'people') + ' in “' + (res.name || fallbackName) + '”' : 'You’re in “' + (res.name || fallbackName) + '”. Others will connect as they join.');
+  return loadPeopleAndGroups().then(function(){ renderAll(); });
+}
+function groupConnect(g){
+  var sb = AS.auth.client(); if (!sb) return;
+  sb.rpc('fc_group_connect', { gid:g.id }).then(function(r){
+    if (r.error) { showToast('Group sharing isn’t switched on yet.'); return; }
+    if (GROUP_CONSENT) GROUP_CONSENT[g.id] = true;
+    afterConnect(r.data, g.name);
+  });
+}
+function newInviteToken(){
+  var a = new Uint8Array(18); crypto.getRandomValues(a);
+  return btoa(String.fromCharCode.apply(null, a)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function groupLink(g){ return location.origin + location.pathname + '?join=' + g.id + '.' + g.inviteToken; }
+// Owner's screen: the link and QR code to share. "Reset" kills the old link.
+function renderGroupInvite(g, justCreated){
+  var card = document.getElementById('sheet-card'), sb = AS.auth.client();
+  function draw(){
+    var url = g.inviteToken ? groupLink(g) : '';
+    card.innerHTML = '<h4>' + (justCreated ? '“' + esc(g.name) + '” is ready' : 'Invite to “' + esc(g.name) + '”') + '</h4>'
+      + '<div style="font-size:13px;color:var(--soft);margin-bottom:8px">Share this link or QR code. Everyone who opens it and says yes joins the group and is added to everyone else’s calendar — nobody has to add each other one by one.</div>'
+      + (url ? '<div id="grp-qr" style="display:flex;justify-content:center;margin:10px 0;background:#fff;border-radius:12px;padding:12px"></div><div class="grplink">' + esc(url) + '</div>'
+              + '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="grp-copy">Copy link</button>' + (navigator.share ? '<button class="btn" id="grp-share">Share…</button>' : '') + '<button class="btn ghost" id="grp-reset">Reset link</button></div>'
+              : '<div class="form-error" id="grp-err">Making the link…</div>')
+      + '<button class="btn ghost" id="grp-done" style="width:100%;margin-top:10px">Done</button>';
+    document.getElementById('grp-done').addEventListener('click', function(){ closeSheet(); renderAll(); });
+    if (!url) return;
+    if (typeof QRCode !== 'undefined') new QRCode(document.getElementById('grp-qr'), { text:url, width:180, height:180 });
+    document.getElementById('grp-copy').addEventListener('click', function(){
+      (navigator.clipboard && navigator.clipboard.writeText ? navigator.clipboard.writeText(url) : Promise.reject()).then(function(){ showToast('Link copied'); }, function(){ showToast('Press and hold the link to copy it'); });
+    });
+    var sh = document.getElementById('grp-share');
+    if (sh) sh.addEventListener('click', function(){ navigator.share({ title:'Join “' + g.name + '” on Friend Calendar', text:'Join “' + g.name + '” on Friend Calendar so we can all see when we’re free:', url:url }).catch(function(){}); });
+    document.getElementById('grp-reset').addEventListener('click', function(){
+      if (!window.confirm('Reset the link? The old link and QR code will stop working.')) return;
+      make(true);
+    });
+  }
+  function make(force){
+    if (g.inviteToken && !force) return draw();
+    var tok = newInviteToken();
+    sb.from('crew_groups').update({ invite_token:tok }).eq('id', g.id).then(function(r){
+      if (r.error) {
+        card.innerHTML = '<h4>Invite link</h4><div class="form-error">Group links need a one-time setup in the database first. (' + esc(r.error.message || '') + ')</div><button class="btn ghost" id="grp-done" style="width:100%;margin-top:10px">Done</button>';
+        document.getElementById('grp-done').addEventListener('click', function(){ closeSheet(); renderAll(); });
+        return;
+      }
+      g.inviteToken = tok; draw();
+    });
+  }
+  openSheet(); draw(); make(false);
+}
+// Opening someone's invite link: show what it is, then join on a yes.
+function handleJoinFromLink(){
+  var pend = null;
+  try { pend = JSON.parse(localStorage.getItem('fc_pending_join') || 'null'); } catch (e) {}
+  if (!pend || !pend.v || Date.now() - (pend.t || 0) > 3 * 86400000) { try { localStorage.removeItem('fc_pending_join'); } catch (e) {} return; }
+  try { var q = new URLSearchParams(location.search); if (q.get('join')) history.replaceState(null, '', location.pathname); } catch (e) {}
+  var parts = pend.v.split('.'), gid = parts[0], tok = parts[1], sb = AS.auth.client();
+  if (!sb || !gid || !tok) return;
+  function forget(){ try { localStorage.removeItem('fc_pending_join'); } catch (e) {} }
+  sb.rpc('fc_group_peek', { gid:gid, tok:tok }).then(function(r){
+    if (r.error) { showToast('Group invites aren’t switched on yet.'); forget(); return; }
+    var d = r.data || {};
+    if (!d.ok) { forget(); showToast(d.error || 'That invite is no longer valid.'); return; }
+    var card = document.getElementById('sheet-card');
+    card.innerHTML = '<h4>Join “' + esc(d.name) + '”?</h4>'
+      + '<div style="font-size:14px;margin-bottom:6px">' + esc(d.owner) + ' invited you.</div>'
+      + '<div style="font-size:13px;color:var(--soft);margin-bottom:12px">When you join, you and everyone who has joined' + (d.joined ? ' (' + d.joined + ' so far)' : '') + ' will see each other’s free time on your calendars. You choose who sees what when you add your free time.</div>'
+      + '<button class="btn" id="join-yes" style="width:100%">Join and connect</button><button class="btn ghost" id="join-no" style="width:100%;margin-top:6px">Not now</button>';
+    openSheet();
+    document.getElementById('join-no').addEventListener('click', function(){ forget(); closeSheet(); });
+    document.getElementById('join-yes').addEventListener('click', function(){
+      this.disabled = true; this.textContent = 'Joining…';
+      sb.rpc('fc_group_join', { gid:gid, tok:tok }).then(function(j){
+        forget(); closeSheet();
+        if (j.error) { showToast('Couldn’t join — try again.'); return; }
+        afterConnect(j.data, d.name);
+      });
+    });
+  });
+}
+
 /* ---------------- FRIENDS LIST ---------------- */
 // Nicknames are only ever offered for a friend whose profile has no name at
 // all (someone who signed up before names were saved properly). Stored on
@@ -3639,9 +3768,9 @@ function openAddGroup(){
   var card = document.getElementById('sheet-card');
   card.innerHTML = '<h4>New group</h4>'
     + '<div class="field"><label>Group name</label><input type="text" id="gr-name" placeholder="e.g. Ski crew"/></div>'
-    + '<div class="sec">Members</div>'
-    + PEOPLE.filter(function(p){ return p.id !== viewerId; })
-        .map(function(p){ return personPickRow(p, 'gr-member', false); }).join('')
+    + '<div class="sec">Add friends you already have <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></div>'
+    + (PEOPLE.length > 1 ? PEOPLE.filter(function(p){ return p.id !== viewerId; }).map(function(p){ return personPickRow(p, 'gr-member', false); }).join('') : '<div style="font-size:13px;color:var(--soft);margin-bottom:6px">No friends yet — that’s fine. You’ll get a link and QR code to share with the group next.</div>')
+    + '<div style="font-size:12px;color:var(--soft);margin:2px 0 8px">Everyone who joins the group (by your link, or by saying yes when they’re added) ends up on each other’s calendars — nobody has to add each other one by one.</div>'
     + '<div class="form-error" id="gr-error"></div>'
     + '<button class="btn" id="gr-save" style="width:100%">Create</button>'
     + '<button class="btn ghost" id="gr-cancel" style="width:100%;margin-top:6px">Cancel</button>';
@@ -3652,7 +3781,6 @@ function openAddGroup(){
     var err = document.getElementById('gr-error');
     if (!name) { err.textContent = 'Needs a name.'; return; }
     var memberIds = Array.from(document.querySelectorAll('.gr-member:checked')).map(function(cb){ return cb.value; });
-    if (!memberIds.length) { err.textContent = 'Pick at least one person.'; return; }
     var btn = document.getElementById('gr-save');
     btn.disabled = true; btn.textContent = 'Creating…';
     var sb = AS.auth.client();
@@ -3661,14 +3789,17 @@ function openAddGroup(){
     sb.from('crew_groups').insert({ owner_id:viewerId, name:name }).select().single()
       .then(function(r){
         if (r.error) throw r.error;
+        if (!memberIds.length) return r.data;
         return sb.from('crew_group_members')
           .insert(memberIds.map(function(id){ return { group_id:r.data.id, member_id:id }; }))
           .then(function(mr){ if (mr.error) throw mr.error; return r.data; });
       })
       .then(function(row){
-        var ng = { id:row.id, name:row.name, memberIds:[viewerId].concat(memberIds), ownerId:viewerId };
+        var ng = { id:row.id, name:row.name, memberIds:[viewerId].concat(memberIds), ownerId:viewerId, inviteToken:'' };
         GROUPS.push(ng); ensureGroupThread(ng);
-        closeSheet(); renderAll();
+        // Making the group is the owner's "yes": from now on anyone who joins is connected to them.
+        try { sb.rpc('fc_group_connect', { gid:ng.id }).then(function(){ if (GROUP_CONSENT) GROUP_CONSENT[ng.id] = true; renderAll(); }, function(){}); } catch (e) {}
+        renderAll(); renderGroupInvite(ng, true);
       })
       .catch(function(e){
         btn.disabled = false; btn.textContent = 'Create';
@@ -3690,16 +3821,17 @@ function openEditGroup(g){
         .map(function(p){ return personPickRow(p, 'gr-member', g.memberIds.indexOf(p.id) !== -1); }).join('')
     + '<div class="form-error" id="gr-error"></div>'
     + '<button class="btn" id="gr-save" style="width:100%">Save changes</button>'
+    + '<button class="btn ghost" id="gr-invite" style="width:100%;margin-top:6px">Invite link &amp; QR code</button>'
     + '<button class="btn ghost danger" id="gr-delete" style="width:100%;margin-top:6px">Delete group</button>'
     + '<button class="btn ghost" id="gr-cancel" style="width:100%;margin-top:6px">Cancel</button>';
   openSheet();
   document.getElementById('gr-cancel').addEventListener('click', closeSheet);
+  document.getElementById('gr-invite').addEventListener('click', function(){ renderGroupInvite(g); });
   document.getElementById('gr-save').addEventListener('click', function(){
     var name = document.getElementById('gr-name').value.trim();
     var err = document.getElementById('gr-error');
     if (!name) { err.textContent = 'Needs a name.'; return; }
     var memberIds = Array.from(document.querySelectorAll('.gr-member:checked')).map(function(cb){ return cb.value; });
-    if (!memberIds.length) { err.textContent = 'Pick at least one person.'; return; }
     var before = g.memberIds.filter(function(id){ return id !== viewerId; });
     var toAdd = memberIds.filter(function(id){ return before.indexOf(id) === -1; });
     var toRemove = before.filter(function(id){ return memberIds.indexOf(id) === -1; });
@@ -5805,6 +5937,7 @@ function renderAll(){
   renderBadges();
   renderMeButton();
   renderSetupCard();
+  renderGroupPrompts();
 }
 
 /* ---------------- AUTH GATE + REAL CREW/GROUPS ----------------
@@ -5944,7 +6077,7 @@ function loadGroups(sb, myId){
           var ids = [g.owner_id].concat(membersByGroup[g.id] || []);
           var seen = {};
           ids = ids.filter(function(id){ return seen[id] ? false : (seen[id] = true); });
-          return { id:g.id, name:g.name, memberIds:ids, ownerId:g.owner_id };
+          return { id:g.id, name:g.name, memberIds:ids, ownerId:g.owner_id, inviteToken:g.invite_token || '' };
         });
       });
   });
@@ -6061,6 +6194,7 @@ function loadPeopleAndGroups(){
     .catch(function(e){ console.warn('[friend-calendar] blocks load failed:', e && e.message); })
     .then(function(){ return loadGroups(sb, user.id); })
     .catch(function(e){ console.warn('[friend-calendar] groups load failed:', e && e.message); })
+    .then(function(){ return loadGroupConsent(sb, user.id); })
     // Plans, before threads -- a plan's own chat thread references it
     // by plan_id, so loading plans (and thus knowing which still exist)
     // before threads keeps that consistent from the first paint.
@@ -6470,6 +6604,7 @@ function boot(){
     renderAll();
     handleAddFromLink();
     maybeWelcome();
+    handleJoinFromLink();
   });
   // A friend's message, invite, RSVP reply, or new event otherwise only
   // shows up once you happen to reopen the relevant sheet -- this keeps
