@@ -302,6 +302,14 @@
   .vp .vpchip:has(input:checked){background:var(--accent-bg);border-color:var(--accent);font-weight:700}
   .vp .vpchip.grp:has(input:checked){background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
   .vp .vp-sum{font-size:12px;color:var(--soft);margin:4px 0 4px}
+  .daynav{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+  .daynav h4{margin:0 !important;flex:1;text-align:center}
+  .daynav button{flex:none;width:38px;height:38px;border-radius:50%;border:1.5px solid var(--rule);background:var(--card);color:var(--ink);font:400 22px/1 var(--sans);cursor:pointer;padding:0}
+  .daynav button:hover{border-color:var(--ink)}
+  @keyframes slideFromR{from{transform:translateX(34px);opacity:.25}to{transform:none;opacity:1}}
+  @keyframes slideFromL{from{transform:translateX(-34px);opacity:.25}to{transform:none;opacity:1}}
+  @media (prefers-reduced-motion:no-preference){ .slide-r{animation:slideFromR .2s ease-out} .slide-l{animation:slideFromL .2s ease-out} }
+  #calwrap{touch-action:pan-y}
   .rvrow{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:13px;color:var(--soft)}
   .rvrow input[type=date]{flex:1;min-width:0;font:500 14px var(--sans);padding:6px 6px;border:1.5px solid var(--rule);border-radius:8px;background:var(--card);color:var(--ink)}
   .rvrow select{font:500 14px var(--sans);padding:6px 3px;border:1.5px solid var(--rule);border-radius:8px;background:var(--card);color:var(--ink)}
@@ -1497,8 +1505,66 @@ function shiftMonth(n){
   renderCalendar();
 }
 function setViewMonth(y, m){ viewYear = y; viewMonth = m; renderCalendar(); }
-document.getElementById('prev-month').addEventListener('click', function(){ shiftMonth(-1); });
-document.getElementById('next-month').addEventListener('click', function(){ shiftMonth(1); });
+document.getElementById('prev-month').addEventListener('click', function(){ stepCal(-1); });
+document.getElementById('next-month').addEventListener('click', function(){ stepCal(1); });
+// Previous / next month (or week, in Week view), with a short slide so it's clear which way you went.
+function stepCal(n){
+  shiftMonth(n);
+  var el = document.getElementById(viewMode === 'week' ? 'weekwrap' : 'calgrid');
+  if (!el) return;
+  el.classList.remove('slide-r', 'slide-l'); void el.offsetWidth;
+  el.classList.add(n > 0 ? 'slide-r' : 'slide-l');
+}
+// Previous / next DAY from inside the day sheet; the calendar behind follows so it never shows the wrong month/week.
+var _dayDir = 0;
+function goDay(n){
+  if (!openDate) return;
+  var d = addDaysStr(openDate, n), pd = parseDate(d);
+  openDate = d; _dayDir = n;
+  if (viewMode === 'week') {
+    var ws = weekStart || mondayOf(TODAY);
+    if (d < ws || d > addDaysStr(ws, 6)) { weekStart = mondayOf(d); renderCalendar(); }
+  } else if (pd.getFullYear() !== viewYear || pd.getMonth() !== viewMonth) {
+    setViewMonth(pd.getFullYear(), pd.getMonth());
+  }
+  renderDaySheet();
+}
+// Swipe left = next, swipe right = previous. A deliberate, mostly-horizontal flick only, so it never
+// fights scrolling, and not from the very edge of the screen (that's the phone's own back gesture).
+function bindSwipe(el, onNext, onPrev, ignore){
+  var sx = 0, sy = 0, st = 0, active = false;
+  el.addEventListener('touchstart', function(e){
+    active = false;
+    if (e.touches.length !== 1) return;
+    var t = e.touches[0];
+    if (t.clientX < 24 || t.clientX > window.innerWidth - 24) return;
+    if (ignore && ignore(e.target)) return;
+    sx = t.clientX; sy = t.clientY; st = Date.now(); active = true;
+  }, { passive:true });
+  el.addEventListener('touchend', function(e){
+    if (!active) return; active = false;
+    var t = e.changedTouches[0], dx = t.clientX - sx, dy = t.clientY - sy;
+    if (Date.now() - st > 700 || Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+    try { localStorage.setItem('fc_swipe_hint', '1'); } catch (er) {}
+    if (dx < 0) onNext(); else onPrev();
+  }, { passive:true });
+  el.addEventListener('touchcancel', function(){ active = false; }, { passive:true });
+}
+function notSwipable(t){ return !!(t && t.closest && t.closest('input, select, textarea, #people-chips, #avail-bar')); }
+bindSwipe(document.getElementById('calwrap'), function(){ stepCal(1); }, function(){ stepCal(-1); }, notSwipable);
+bindSwipe(document.getElementById('sheet-card'), function(){ goDay(1); }, function(){ goDay(-1); }, function(t){
+  return !document.getElementById('day-prev') || notSwipable(t);   // only on the day sheet itself, never on a form
+});
+// A one-time tip on touch screens, since a swipe isn't something you'd think to try.
+if ('ontouchstart' in window) {
+  setTimeout(function(){
+    var seen = false; try { seen = !!localStorage.getItem('fc_swipe_hint'); } catch (e) {}
+    if (!seen && viewerId && !document.getElementById('sheet-bg').classList.contains('on')) {
+      showToast('Tip: swipe the calendar left or right to change month');
+      try { localStorage.setItem('fc_swipe_hint', '1'); } catch (e) {}
+    }
+  }, 6000);
+}
 document.getElementById('today-btn').addEventListener('click', function(){
   var n = new Date(); weekStart = mondayOf(TODAY); setViewMonth(n.getFullYear(), n.getMonth());
 });
@@ -1525,7 +1591,7 @@ function renderDaySheet(){
   var ids = activeIds();
   var an = dayAnalysis(date, ids);
   var viewer = personById(viewerId);
-  var html = '<h4>' + longDate(date) + '</h4>';
+  var html = '<div class="daynav"><button id="day-prev" aria-label="Previous day">‹</button><h4>' + longDate(date) + '</h4><button id="day-next" aria-label="Next day">›</button></div>';
 
   // --- the headline: when is the best overlap, and who's in it ---
   if (an.best.size >= 2) {
@@ -1610,7 +1676,10 @@ function renderDaySheet(){
   html += '<button class="btn ghost" id="sheet-close" style="width:100%;margin-top:14px">Done</button>';
 
   var card = document.getElementById('sheet-card');
-  card.innerHTML = html;
+  card.innerHTML = '<div class="day-body">' + html + '</div>';
+  if (_dayDir) { var db = card.querySelector('.day-body'); db.classList.add(_dayDir > 0 ? 'slide-r' : 'slide-l'); _dayDir = 0; }
+  document.getElementById('day-prev').addEventListener('click', function(){ goDay(-1); });
+  document.getElementById('day-next').addEventListener('click', function(){ goDay(1); });
 
   document.getElementById('sheet-close').addEventListener('click', closeSheet);
   document.getElementById('work-open').addEventListener('click', function(){ renderWork('weekly'); });
