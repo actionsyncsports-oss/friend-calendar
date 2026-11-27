@@ -2379,6 +2379,10 @@ function parseCsvBusy(text){
 }
 
 // ---- photo / by-hand entry ----
+// Photo reading costs money per photo (needs ANTHROPIC_API_KEY on the server --
+// see api/read-schedule.js). Off until that's deliberately switched on; the
+// by-hand entry below is free and always available.
+var PHOTO_READING = false;
 var _workReview = null;   // { rows:[{date,start,end}], unsure, fromPhoto }
 // Phone photos are huge; handwriting stays legible at ~1800px, and a small
 // JPEG uploads fast on a bad connection.
@@ -2497,7 +2501,7 @@ function renderWork(tab){
   var card = document.getElementById('sheet-card');
   var nBusy = busyBlocks('').length;
   var tabs = '<div class="chips-row"><button class="chip' + (tab === 'weekly' ? ' on' : '') + '" data-wtab="weekly">Weekly hours</button>'
-    + '<button class="chip' + (tab === 'photo' ? ' on' : '') + '" data-wtab="photo">Photo / by hand</button>'
+    + '<button class="chip' + (tab === 'photo' ? ' on' : '') + '" data-wtab="photo">' + (PHOTO_READING ? 'Photo / by hand' : 'By hand') + '</button>'
     + '<button class="chip' + (tab === 'import' ? ' on' : '') + '" data-wtab="import">Import a file</button></div>';
   var h = '<h4>Work &amp; busy times</h4>'
     + '<div style="font-size:13px;color:var(--soft);margin-bottom:10px">Anything you add here is taken out of your free time, so friends only see you as free when you really are. They see that you’re not free then — never why.</div>' + tabs;
@@ -2515,6 +2519,7 @@ function renderWork(tab){
       + '<div class="form-error" id="wk-error"></div>'
       + '<button class="btn" id="wk-save" style="width:100%">Save work hours</button>';
   } else if (tab === 'photo') {
+    if (!_workReview && !PHOTO_READING) _workReview = { rows:[{ date:TODAY, start:9, end:17 }], unsure:'', fromPhoto:false };
     if (!_workReview) {
       h += '<div style="font-size:13px;color:var(--soft);margin:6px 0 10px">Take a photo of your schedule — handwritten is fine — and it’ll pull out <b>your</b> shifts, split shifts included. You check them before anything is saved.</div>'
         + '<div class="field"><label>Your name as it’s written on the schedule</label><input type="text" id="ph-name" maxlength="40" value="' + esc((personById(viewerId) || {}).name || '') + '"/></div>'
@@ -2537,7 +2542,7 @@ function renderWork(tab){
     h += '<div style="font-size:13px;color:var(--soft);margin:6px 0 10px">Upload your schedule as a calendar file (<b>.ics</b> — what Google Calendar, Apple Calendar, Outlook and most scheduling apps export) or a simple <b>.csv</b> with a date and start/end time on each line. Everything in it is closed out of your free time.</div>'
       + '<input type="file" id="wk-file" accept=".ics,.csv,.txt,text/calendar,text/csv,text/plain" style="width:100%;margin-bottom:8px"/>'
       + '<div id="wk-msg" style="font-size:13px;color:var(--soft)"></div>'
-      + '<div style="font-size:12px;color:var(--soft);margin-top:10px">Have a paper or handwritten schedule? Use the <b>Photo / by hand</b> tab.</div>';
+      + '<div style="font-size:12px;color:var(--soft);margin-top:10px">Have a paper or handwritten schedule? Use the <b>' + (PHOTO_READING ? 'Photo / by hand' : 'By hand') + '</b> tab to type it in.</div>';
   } else {
     var it = _workImport, days = {}; it.items.forEach(function(x){ days[x.date] = 1; });
     var dates = Object.keys(days).sort();
