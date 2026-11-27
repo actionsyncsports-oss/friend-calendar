@@ -36,9 +36,10 @@
   button{font-family:inherit}
   button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
-  #topbar{display:flex;align-items:baseline;gap:14px;padding:18px 18px 6px;flex-wrap:wrap}
+  #topbar{display:flex;align-items:center;gap:8px;padding:16px 14px 6px}
   #topbar{position:relative}
-  #topbar b{font:400 22px var(--serif);margin-right:auto}
+  #topbar b{font:400 21px var(--serif);margin-right:auto;white-space:nowrap}
+  @media (max-width:400px){ #topbar b{font-size:18px} #topbar{gap:6px;padding-left:12px;padding-right:12px} }
   #topbar select{padding:2px 4px;border:none;border-bottom:1.5px solid var(--ink);background:transparent;font:700 14px var(--sans);color:var(--ink);border-radius:0}
 
   .btn{background:var(--ink);color:var(--paper);border:none;border-radius:999px;padding:8px 16px;font:700 13px var(--sans);cursor:pointer}
@@ -50,6 +51,10 @@
   #topbar .btn{background:transparent;color:var(--ink);box-shadow:inset 0 0 0 1.5px var(--ink)}
   #topbar .btn.ghost{box-shadow:none;color:var(--soft);font-weight:500}
 
+  #topbar .ibtn{width:38px;height:38px;border-radius:50%;border:none;background:var(--card);box-shadow:inset 0 0 0 1.5px var(--rule);display:inline-flex;align-items:center;justify-content:center;color:var(--ink);position:relative;flex:none;padding:0;cursor:pointer}
+  #topbar .ibtn:hover{box-shadow:inset 0 0 0 1.5px var(--ink)}
+  #topbar .ibtn svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+  #topbar .ibtn .badge{position:absolute;top:-3px;right:-3px;min-width:17px;height:17px;border-radius:9px;background:var(--busy);color:#fff;font:700 10px/17px var(--sans);text-align:center;padding:0 4px}
   #topbar .btn .badge{display:inline-block;min-width:18px;height:18px;line-height:18px;margin-left:6px;padding:0 5px;border-radius:9px;background:var(--busy);color:#fff;font-size:11px;text-align:center}
   .thread-row{display:flex;gap:10px;align-items:baseline;padding:10px 0;border-bottom:1px solid var(--rule);cursor:pointer}
   .thread-row .tt{font-weight:700;font-size:15px}
@@ -94,7 +99,19 @@
   #topbar #more-menu .btn{box-shadow:none;background:transparent;border-radius:10px;text-align:left;width:100%;padding:12px 14px;font:600 14px var(--sans);color:var(--ink)}
   #topbar #more-menu .btn:hover{background:var(--accent-bg)}
   #topbar #more-menu .btn.signout{color:var(--busy)}
-  #people-chips{display:flex;gap:8px;overflow-x:auto;flex-basis:100%;padding:2px 0 8px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  #filters{gap:8px 7px !important}
+  #filters .chip.group{border:none;border-radius:999px;padding:6px 14px;background:var(--card);box-shadow:inset 0 0 0 1.5px var(--rule);color:var(--soft);font:700 13px var(--sans);border-bottom:none}
+  #filters .chip.group.on{background:var(--ink);color:#fff;box-shadow:none}
+  #filters .chip.group.dashed{background:transparent;box-shadow:none;border:1.5px dashed var(--box);padding:5px 13px;color:var(--accent)}
+  #filters .chip.group.edit{background:transparent;box-shadow:none;color:var(--accent);padding:6px 6px}
+  #people-chips{display:flex;gap:14px;overflow-x:auto;flex-basis:100%;padding:8px 2px 10px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  .story{flex:none;width:56px;border:none;background:transparent;padding:0;text-align:center;font:700 11px var(--sans);color:var(--ink);cursor:pointer}
+  .story .av{--s:50px;border-width:3px;margin:0 auto 6px;display:flex;box-shadow:0 0 0 2px var(--paper),0 0 0 4px var(--c);font-size:19px}
+  .story .nm{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .story.off{opacity:.5}
+  .story.off .av{filter:grayscale(1);box-shadow:0 0 0 2px var(--paper),0 0 0 4px var(--box)}
+  .story.add .av{background:var(--card);border-color:var(--box);color:var(--soft);box-shadow:none;font:300 28px var(--sans)}
+  .story:focus-visible .av{outline:2px solid var(--accent);outline-offset:3px}
   #people-chips::-webkit-scrollbar{display:none}
   .chip.pchip{flex:none;border:1.5px solid var(--rule);border-radius:999px;background:var(--card);padding:4px 13px 4px 5px;color:var(--soft);font:600 13px var(--sans);white-space:nowrap;border-bottom:1.5px solid var(--rule)}
   .chip.pchip .av{--s:22px}
@@ -348,10 +365,10 @@
 
 <div id="topbar">
   <b>Friend Calendar</b>
-  <button class="btn" id="friends-btn">Friends</button>
-  <button class="btn" id="msg-btn">Messages</button>
-  <button class="btn" id="notif-btn">Alerts</button>
-  <button class="btn" id="more-btn" aria-haspopup="true" aria-expanded="false">More &#9662;</button>
+  <button class="ibtn" id="friends-btn" title="Friends" aria-label="Friends"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17" cy="9" r="2.5"/><path d="M16 14.2c3 .2 5 2.4 5 5.8"/></svg></button>
+  <button class="ibtn" id="msg-btn" title="Messages" aria-label="Messages"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H10l-5 4v-4H4z"/></svg></button>
+  <button class="ibtn" id="notif-btn" title="Alerts" aria-label="Alerts"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17v-6a6 6 0 1 1 12 0v6l1.5 2h-15z"/><path d="M10 21h4"/></svg></button>
+  <button class="ibtn" id="more-btn" title="More" aria-label="More" aria-haspopup="true" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg></button>
   <div id="more-menu" hidden>
     <button class="btn" id="work-btn">Work hours</button>
     <button class="btn" id="local-btn">Events and spots</button>
@@ -1207,18 +1224,16 @@ function renderFilters(){
   var el = document.getElementById('filters');
   var activeGroup = activeGroupId ? GROUPS.filter(function(g){ return g.id === activeGroupId; })[0] : null;
   if (!activeGroup) activeGroupId = null;   // the active group got deleted/renamed away from under us -- fall back to Everyone
-  var html = '<span class="lbl">Counting</span>';
-  html += '<button class="chip group' + (activeGroupId ? '' : ' on') + '" data-all="1">Everyone</button>';
+  var html = '<button class="chip group' + (activeGroupId ? '' : ' on') + '" data-all="1">Everyone</button>';
   html += GROUPS.map(function(g){
     return '<button class="chip group' + (g.id === activeGroupId ? ' on' : '') + '" data-group="' + g.id + '">' + esc(g.name) + '</button>';
   }).join('');
+  html += '<button class="chip group dashed" id="add-group-btn">+ Group</button>';
   // Only the group's owner can actually save changes (crew_groups_own
   // is owner-only at the RLS level) -- showing this to a member who'd
   // just hit a permission error on save isn't worth the confusion.
-  if (activeGroup && activeGroup.ownerId === viewerId) html += '<button class="btn small ghost" id="edit-group-btn">Edit group</button>';
-  html += '<button class="btn small ghost" id="add-friend-btn">+ Friend</button>';
-  html += '<button class="btn small ghost" id="add-group-btn">+ Group</button>';
-  html += '<div id="people-chips"></div>';   // its own scrolling row below -- the full searchable list is the Friends button
+  if (activeGroup && activeGroup.ownerId === viewerId) html += '<button class="chip group edit" id="edit-group-btn">Edit group</button>';
+  html += '<div id="people-chips"></div>';   // its own scrolling photo row below -- the full searchable list is the Friends button
   el.innerHTML = html;
 
   el.querySelector('[data-all]').addEventListener('click', function(){
@@ -1259,10 +1274,11 @@ function renderFilters(){
       var parts = (p.name || '').trim().split(/\s+/), f = parts[0] || '?';
       return firsts[f.toLowerCase()] > 1 && parts.length > 1 ? f + ' ' + parts[parts.length - 1].charAt(0) + '.' : f;
     }
-    chips.innerHTML = others.length ? others.map(function(p){
+    var addBtn = '<button class="story add" id="add-friend-btn" title="Add a friend" aria-label="Add a friend"><span class="av">+</span><span class="nm">Add</span></button>';
+    chips.innerHTML = addBtn + (others.length ? others.map(function(p){
       var on = selectedIds.indexOf(p.id) !== -1;
-      return '<button class="chip pchip' + (on ? ' on' : '') + '" data-person="' + p.id + '" title="' + esc(p.name + ' — ' + friendNote(viewerId, p.id)) + '">' + avatarHtml(p, 22) + esc(short(p)) + '</button>';
-    }).join('') : (q ? '<span class="lbl">No one matches “' + esc(peopleSearch.trim()) + '”</span>' : '');
+      return '<button class="story' + (on ? '' : ' off') + '" data-person="' + p.id + '" aria-pressed="' + on + '" title="' + esc(p.name + ' — ' + friendNote(viewerId, p.id)) + '">' + avatarHtml(p, 50) + '<span class="nm">' + esc(short(p)) + '</span></button>';
+    }).join('') : (q ? '<span class="lbl">No one matches “' + esc(peopleSearch.trim()) + '”</span>' : ''));
     chips.querySelectorAll('[data-person]').forEach(function(b){
       b.addEventListener('click', function(){
         var id = b.dataset.person, i = selectedIds.indexOf(id);
@@ -3465,10 +3481,13 @@ function syncAlertSeen(){
 function unreadAlerts(personId){
   return liveAlerts(personId).length + nudgesFor(personId).length;
 }
+var ICON_CHAT = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v11H10l-5 4v-4H4z"/></svg>', ICON_BELL = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17v-6a6 6 0 1 1 12 0v6l1.5 2h-15z"/><path d="M10 21h4"/></svg>';
 function renderBadges(){
   var m = totalUnread(viewerId), a = unreadAlerts(viewerId);
-  document.getElementById('msg-btn').innerHTML = 'Messages' + (m ? '<span class="badge">' + m + '</span>' : '');
-  document.getElementById('notif-btn').innerHTML = 'Alerts' + (a ? '<span class="badge">' + a + '</span>' : '');
+  document.getElementById('msg-btn').innerHTML = ICON_CHAT + (m ? '<span class="badge">' + m + '</span>' : '');
+  document.getElementById('msg-btn').setAttribute('aria-label', m ? 'Messages, ' + m + ' unread' : 'Messages');
+  document.getElementById('notif-btn').innerHTML = ICON_BELL + (a ? '<span class="badge">' + a + '</span>' : '');
+  document.getElementById('notif-btn').setAttribute('aria-label', a ? 'Alerts, ' + a + ' new' : 'Alerts');
 }
 
 // Which thread (if any) is the open sheet currently showing -- so a
