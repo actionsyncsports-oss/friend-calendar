@@ -466,6 +466,7 @@
   <div id="more-menu" hidden>
     <button class="btn" id="profile-btn">My profile</button>
     <button class="btn" id="theme-btn">Appearance</button>
+    <button class="btn" id="notify-btn">Notifications</button>
     <button class="btn ghost" id="install-btn" style="display:none">Install app</button>
     <button class="btn ghost" id="actionsync-sync-btn">ActionSync sync (later)</button>
     <button class="btn ghost signout" id="signout-btn">Sign out</button>
@@ -3546,6 +3547,123 @@ function handleJoinFromLink(){
         });
       });
     });
+  });
+}
+
+/* ---------------- PHONE NOTIFICATIONS ---------------- */
+// Real notifications from outside the app (like a messaging app): a message, a plan invite, a reply to your plan,
+// being added to a group. This phone subscribes once (Web Push); the database decides who to tell and the server
+// delivers it. Which kinds you get is chosen per phone, and a muted chat stays muted.
+var PUSH_PUBLIC_KEY = 'BCQ7GIIsaELDIFc0QUaSjIaX5kV3-ZEiz5XbHO0KNT9rDkpjjis6Nb1iGl7AYivCs7EV_mU1L5DCwsfc9VPVrzQ';
+var PUSH_KINDS = [['message', 'New messages'], ['invite', 'Invites to plans'], ['rsvp', 'Replies to plans I set up'], ['group', 'Groups I’m added to, and people joining mine']];
+function pushSupported(){ return ('serviceWorker' in navigator) && ('PushManager' in window) && ('Notification' in window); }
+function b64ToBytes(b64){
+  var pad = '='.repeat((4 - b64.length % 4) % 4), raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/')), out = new Uint8Array(raw.length);
+  for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+function swReady(){
+  return Promise.race([navigator.serviceWorker.ready, new Promise(function(_, rej){ setTimeout(function(){ rej(new Error('The app isn’t ready for notifications yet — reload and try again.')); }, 5000); })]);
+}
+function thisPhoneSub(){ return swReady().then(function(reg){ return reg.pushManager.getSubscription().then(function(sub){ return { reg:reg, sub:sub }; }); }); }
+function pushPrefsFromBoxes(card){
+  var prefs = {}; PUSH_KINDS.forEach(function(k){ var c = card.querySelector('[data-pk="' + k[0] + '"]'); prefs[k[0]] = c ? c.checked : true; });
+  return prefs;
+}
+function openNotifySettings(){
+  var card = document.getElementById('sheet-card');
+  openSheet();
+  card.innerHTML = '<h4>Notifications</h4><div style="font-size:13px;color:var(--soft)">Checking this phone…</div>';
+  function say(h, extra){
+    card.innerHTML = '<h4>Notifications</h4>' + h + (extra || '') + '<button class="btn ghost" id="nf-done" style="width:100%;margin-top:10px">Done</button>';
+    document.getElementById('nf-done').addEventListener('click', closeSheet);
+  }
+  if (!pushSupported()) {
+    return say('<div style="font-size:14px;line-height:1.5">This browser can’t show notifications from outside the app.' + (isIos() ? ' On iPhone, first add Friend Calendar to your Home Screen (Share → Add to Home Screen), then open it from there.' : '') + '</div>');
+  }
+  var sb = AS.auth.client();
+  thisPhoneSub().then(function(st){
+    var on = !!st.sub && Notification.permission === 'granted';
+    if (!on) {
+      var denied = Notification.permission === 'denied';
+      say('<div style="font-size:14px;line-height:1.5;margin-bottom:10px">Get a notification on this phone when a friend messages you, invites you to something, answers your plan, or adds you to a group — even when the app is closed.</div>'
+        + (denied ? '<div class="form-error">Notifications are blocked for this site. Allow them in your browser’s site settings (the padlock or ⓘ next to the address), then come back.</div>'
+                  : '<button class="btn" id="nf-on" style="width:100%">Turn on notifications</button><div class="form-error" id="nf-err"></div>'));
+      var b = document.getElementById('nf-on'); if (!b) return;
+      b.addEventListener('click', function(){
+        b.disabled = true; b.textContent = 'Turning on…';
+        Notification.requestPermission().then(function(perm){
+          if (perm !== 'granted') throw new Error('Notifications weren’t allowed, so nothing was turned on.');
+          return st.reg.pushManager.subscribe({ userVisibleOnly:true, applicationServerKey:b64ToBytes(PUSH_PUBLIC_KEY) });
+        }).then(function(sub){
+          var j = sub.toJSON(), prefs = { message:true, invite:true, rsvp:true, group:true };
+          return sb.from('friend_calendar_push_subs').upsert({ endpoint:j.endpoint, user_id:viewerId, p256dh:j.keys.p256dh, auth:j.keys.auth, prefs:prefs, ua:String(navigator.userAgent).slice(0, 200), updated_at:new Date().toISOString() }, { onConflict:'endpoint' })
+            .then(function(r){
+              if (r.error) { sub.unsubscribe(); throw new Error(missingTableError(r.error, 'friend_calendar_push_subs') ? 'Notifications aren’t switched on in the database yet.' : r.error.message); }
+              showToast('Notifications are on'); openNotifySettings();
+            });
+        }).catch(function(e){ b.disabled = false; b.textContent = 'Turn on notifications'; document.getElementById('nf-err').textContent = (e && e.message) || 'Couldn’t turn notifications on.'; });
+      });
+      return;
+    }
+    // On: show what you get, with a test button.
+    sb.from('friend_calendar_push_subs').select('prefs').eq('endpoint', st.sub.endpoint).maybeSingle().then(function(r){
+      var prefs = (r.data && r.data.prefs) || {};
+      say('<div style="font-size:13px;color:var(--soft);margin-bottom:8px">On for this phone. Pick what to be told about:</div>'
+        + PUSH_KINDS.map(function(k){ return '<label class="check"><input type="checkbox" data-pk="' + k[0] + '"' + (prefs[k[0]] !== false ? ' checked' : '') + '/> ' + k[1] + '</label>'; }).join('')
+        + '<div style="font-size:12px;color:var(--soft);margin:6px 0 10px">A chat you’ve muted stays quiet. To silence one chat, mute it inside the chat.</div>'
+        + '<div class="form-error" id="nf-err"></div>'
+        + '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="nf-test">Send a test notification</button><button class="btn ghost danger" id="nf-off">Turn off</button></div>');
+      card.querySelectorAll('[data-pk]').forEach(function(c){
+        c.addEventListener('change', function(){
+          sb.from('friend_calendar_push_subs').update({ prefs:pushPrefsFromBoxes(card), updated_at:new Date().toISOString() }).eq('endpoint', st.sub.endpoint).then(function(x){
+            if (x.error) document.getElementById('nf-err').textContent = 'Couldn’t save that: ' + x.error.message;
+          });
+        });
+      });
+      document.getElementById('nf-test').addEventListener('click', function(){
+        var err = document.getElementById('nf-err'); err.style.color = 'var(--soft)'; err.textContent = 'Sending…';
+        sb.rpc('fc_push_test').then(function(t){
+          err.style.color = '';
+          if (t.error || !t.data || !t.data.ok) { err.textContent = (t.data && t.data.error) || 'Notifications aren’t switched on in the database yet.'; return; }
+          err.style.color = 'var(--good)'; err.textContent = 'Sent — it should arrive in a few seconds.';
+        });
+      });
+      document.getElementById('nf-off').addEventListener('click', function(){
+        var ep = st.sub.endpoint;
+        st.sub.unsubscribe().then(function(){ return sb.from('friend_calendar_push_subs').delete().eq('endpoint', ep); }).then(function(){ showToast('Notifications are off on this phone'); openNotifySettings(); });
+      });
+    });
+  }).catch(function(e){ say('<div class="form-error">' + esc((e && e.message) || 'Couldn’t check notifications.') + '</div>'); });
+}
+document.getElementById('notify-btn').addEventListener('click', openNotifySettings);
+
+// Tapping a notification lands on what it was about: ?open=thread:<id> | plan:<id> | group:<id>
+function openTarget(target){
+  var m = /^(thread|plan|group):(.+)$/.exec(String(target || '')); if (!m) return;
+  var kind = m[1], id = m[2];
+  if (kind === 'thread') { if (threadById(id)) { renderThread(id); openSheet(); } else { renderMessages(); openSheet(); } return; }
+  if (kind === 'plan') {
+    var pl = PLANS.filter(function(x){ return x.id === id; })[0];
+    if (!pl) { showToast('That plan isn’t available any more.'); return; }
+    var d = parseDate(pl.date); setViewMonth(d.getFullYear(), d.getMonth()); openDay(pl.date); return;
+  }
+  var g = GROUPS.filter(function(x){ return x.id === id; })[0];
+  if (g) openGroupShare(g); else showToast('Open the group from the bar at the top.');
+}
+function handleOpenFromUrl(){
+  try {
+    var q = new URLSearchParams(location.search), t = q.get('open');
+    if (!t) return;
+    history.replaceState(null, '', location.pathname);
+    openTarget(t);
+  } catch (e) {}
+}
+if ('serviceWorker' in navigator && navigator.serviceWorker.addEventListener) {
+  navigator.serviceWorker.addEventListener('message', function(e){
+    if (e.data && e.data.type === 'open' && viewerId) {
+      loadPeopleAndGroups().then(function(){ renderAll(); openTarget(e.data.open); });   // fresh data first: the thing it was about is new
+    }
   });
 }
 
@@ -6676,6 +6794,7 @@ function boot(){
     handleAddFromLink();
     maybeWelcome();
     handleJoinFromLink();
+    handleOpenFromUrl();
   });
   // A friend's message, invite, RSVP reply, or new event otherwise only
   // shows up once you happen to reopen the relevant sheet -- this keeps

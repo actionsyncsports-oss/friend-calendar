@@ -1,0 +1,8 @@
+{
+  "name": "friend-calendar",
+  "private": true,
+  "description": "Friend Calendar: a static page plus two small serverless functions (api/).",
+  "dependencies": {
+    "web-push": "^3.6.7"
+  }
+}
