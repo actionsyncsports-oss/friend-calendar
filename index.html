@@ -37,6 +37,7 @@
   button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
   #topbar{display:flex;align-items:baseline;gap:14px;padding:18px 18px 6px;flex-wrap:wrap}
+  #topbar{position:relative}
   #topbar b{font:400 22px var(--serif);margin-right:auto}
   #topbar select{padding:2px 4px;border:none;border-bottom:1.5px solid var(--ink);background:transparent;font:700 14px var(--sans);color:var(--ink);border-radius:0}
 
@@ -88,6 +89,18 @@
         border-radius:0;padding:3px 0;font:500 14px var(--sans);cursor:pointer;border-bottom:2px solid transparent}
   .chip.on{color:var(--ink);font-weight:700;border-bottom-color:var(--ink)}
   .chip.group{color:var(--accent)}
+  #more-menu{position:absolute;right:18px;top:100%;z-index:40;background:var(--card);border:1.5px solid var(--rule);border-radius:14px;box-shadow:0 10px 28px rgba(0,0,0,.16);padding:6px;min-width:220px;display:flex;flex-direction:column;gap:2px}
+  #more-menu[hidden]{display:none}
+  #topbar #more-menu .btn{box-shadow:none;background:transparent;border-radius:10px;text-align:left;width:100%;padding:12px 14px;font:600 14px var(--sans);color:var(--ink)}
+  #topbar #more-menu .btn:hover{background:var(--accent-bg)}
+  #topbar #more-menu .btn.signout{color:var(--busy)}
+  #people-chips{display:flex;gap:8px;overflow-x:auto;flex-basis:100%;padding:2px 0 8px;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  #people-chips::-webkit-scrollbar{display:none}
+  .chip.pchip{flex:none;border:1.5px solid var(--rule);border-radius:999px;background:var(--card);padding:4px 13px 4px 5px;color:var(--soft);font:600 13px var(--sans);white-space:nowrap;border-bottom:1.5px solid var(--rule)}
+  .chip.pchip .av{--s:22px}
+  .chip.pchip:not(.on){opacity:.55}
+  .chip.pchip:not(.on) .av{filter:grayscale(1)}
+  .chip.pchip.on{background:var(--accent-bg);border-color:var(--accent);color:var(--ink);font-weight:700;border-bottom-color:var(--accent)}
   .chip.group.on{color:var(--accent);border-bottom-color:var(--accent)}
   #filters .btn.small{margin-left:auto}
   #filters .btn.small + .btn.small{margin-left:0}
@@ -336,15 +349,18 @@
 <div id="topbar">
   <b>Friend Calendar</b>
   <button class="btn" id="friends-btn">Friends</button>
-  <button class="btn" id="work-btn">Work hours</button>
   <button class="btn" id="msg-btn">Messages</button>
   <button class="btn" id="notif-btn">Alerts</button>
-  <button class="btn" id="local-btn">Events and spots</button>
-  <button class="btn" id="playdates-btn">Playdates</button>
-  <button class="btn" id="profile-btn">My profile</button>
-  <button class="btn ghost" id="actionsync-sync-btn">ActionSync sync (later)</button>
-  <button class="btn ghost" id="install-btn" style="display:none">Install app</button>
-  <button class="btn ghost" id="signout-btn">Sign out</button>
+  <button class="btn" id="more-btn" aria-haspopup="true" aria-expanded="false">More &#9662;</button>
+  <div id="more-menu" hidden>
+    <button class="btn" id="work-btn">Work hours</button>
+    <button class="btn" id="local-btn">Events and spots</button>
+    <button class="btn" id="playdates-btn">Playdates</button>
+    <button class="btn" id="profile-btn">My profile</button>
+    <button class="btn ghost" id="install-btn" style="display:none">Install app</button>
+    <button class="btn ghost" id="actionsync-sync-btn">ActionSync sync (later)</button>
+    <button class="btn ghost signout" id="signout-btn">Sign out</button>
+  </div>
 </div>
 
 <div id="filters"></div>
@@ -1196,28 +1212,13 @@ function renderFilters(){
   html += GROUPS.map(function(g){
     return '<button class="chip group' + (g.id === activeGroupId ? ' on' : '') + '" data-group="' + g.id + '">' + esc(g.name) + '</button>';
   }).join('');
-  // A plain text filter rather than another selector to learn -- with
-  // a big crew, scanning every chip to find one name was the actual
-  // complaint. Hidden below a handful of friends, where there's
-  // nothing to search through yet. Only narrows which chips are
-  // SHOWN; selectedIds (who's actually counted) never changes just
-  // from typing here, so search text can't silently drop someone from
-  // the comparison.
-  if (othersOrdered().length > 8) {
-    // flex-basis:100% forces this onto its own line in the wrapping
-    // flex row above -- inline with "Everyone"/the group chips, it sat
-    // crammed right up against "Friends" with no breathing room.
-    html += '<input type="text" id="people-search" placeholder="Find a friend…" value="' + esc(peopleSearch)
-      + '" autocomplete="off" style="flex-basis:100%;border:1.5px solid var(--rule);border-radius:20px;background:transparent;'
-      + 'font:500 14px var(--sans);color:var(--ink);padding:7px 14px;max-width:260px;margin:2px 0 4px"/>';
-  }
-  html += '<span id="people-chips"></span>';
   // Only the group's owner can actually save changes (crew_groups_own
   // is owner-only at the RLS level) -- showing this to a member who'd
   // just hit a permission error on save isn't worth the confusion.
   if (activeGroup && activeGroup.ownerId === viewerId) html += '<button class="btn small ghost" id="edit-group-btn">Edit group</button>';
   html += '<button class="btn small ghost" id="add-friend-btn">+ Friend</button>';
   html += '<button class="btn small ghost" id="add-group-btn">+ Group</button>';
+  html += '<div id="people-chips"></div>';   // its own scrolling row below -- the full searchable list is the Friends button
   el.innerHTML = html;
 
   el.querySelector('[data-all]').addEventListener('click', function(){
@@ -1250,9 +1251,17 @@ function renderFilters(){
     var pool = activeGroup ? othersOrdered().filter(function(p){ return activeGroup.memberIds.indexOf(p.id) !== -1; }) : othersOrdered();
     var others = pool.filter(function(p){ return !q || p.name.toLowerCase().indexOf(q) !== -1; });
     var chips = document.getElementById('people-chips');
+    // First names only, so the row stays short enough to scan; two people who
+    // share a first name get a last initial. Full names are in the Friends list.
+    var firsts = {};
+    others.forEach(function(p){ var f = (p.name || '').trim().split(/\s+/)[0].toLowerCase(); firsts[f] = (firsts[f] || 0) + 1; });
+    function short(p){
+      var parts = (p.name || '').trim().split(/\s+/), f = parts[0] || '?';
+      return firsts[f.toLowerCase()] > 1 && parts.length > 1 ? f + ' ' + parts[parts.length - 1].charAt(0) + '.' : f;
+    }
     chips.innerHTML = others.length ? others.map(function(p){
       var on = selectedIds.indexOf(p.id) !== -1;
-      return '<button class="chip' + (on ? ' on' : '') + '" data-person="' + p.id + '" title="' + esc(friendNote(viewerId, p.id)) + '">' + avatarHtml(p, 18) + esc(p.name) + '</button>';
+      return '<button class="chip pchip' + (on ? ' on' : '') + '" data-person="' + p.id + '" title="' + esc(p.name + ' — ' + friendNote(viewerId, p.id)) + '">' + avatarHtml(p, 22) + esc(short(p)) + '</button>';
     }).join('') : (q ? '<span class="lbl">No one matches “' + esc(peopleSearch.trim()) + '”</span>' : '');
     chips.querySelectorAll('[data-person]').forEach(function(b){
       b.addEventListener('click', function(){
@@ -1263,8 +1272,6 @@ function renderFilters(){
     });
   }
   renderPeopleChips();
-  var searchInput = document.getElementById('people-search');
-  if (searchInput) searchInput.addEventListener('input', function(){ peopleSearch = this.value; renderPeopleChips(); });
   document.getElementById('add-friend-btn').addEventListener('click', openAddFriend);
   document.getElementById('add-group-btn').addEventListener('click', openAddGroup);
 }
@@ -2897,6 +2904,15 @@ function renderFriendsList(){
   });
 }
 document.getElementById('friends-btn').addEventListener('click', openFriends);
+// "More" holds the things used less often, so the top bar stays to three buttons.
+(function(){
+  var btn = document.getElementById('more-btn'), menu = document.getElementById('more-menu');
+  function setOpen(on){ menu.hidden = !on; btn.setAttribute('aria-expanded', on ? 'true' : 'false'); }
+  btn.addEventListener('click', function(e){ e.stopPropagation(); setOpen(menu.hidden); });
+  menu.addEventListener('click', function(){ setOpen(false); });
+  document.addEventListener('click', function(e){ if (!menu.hidden && !menu.contains(e.target)) setOpen(false); });
+  document.addEventListener('keydown', function(e){ if (e.key === 'Escape') setOpen(false); });
+})();
 
 /* ---------------- ADD FRIEND / ADD GROUP ---------------- */
 // Friends are real ActionSync crew. as_add_crew(other_id) already does
