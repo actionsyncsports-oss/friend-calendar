@@ -3366,42 +3366,97 @@ function renderMeButton(){
 // each person adding each other person. Three ways in: the owner's invite link / QR, "you were added to a
 // group" (say yes), or the owner creating it. The database does the connecting (fc_group_connect / fc_group_join)
 // and never connects anyone who hasn't said yes.
-var GROUP_CONSENT = null;   // { groupId: true } for groups I've said yes to; null = the feature isn't set up in the database yet
+var GROUP_CHOICES = null;   // { groupId: { personId: true|false } } = who I've ticked (true) / unticked (false); null = not set up in the database yet
+var GROUP_PEOPLE = {};      // names/photos of group members who aren't (yet) my friends, so the list can show them
 function loadGroupConsent(sb, myId){
-  return sb.from('friend_calendar_group_consent').select('group_id').eq('user_id', myId).then(function(r){
-    if (r.error) { GROUP_CONSENT = null; return; }
-    GROUP_CONSENT = {}; (r.data || []).forEach(function(x){ GROUP_CONSENT[x.group_id] = true; });
-  }, function(){ GROUP_CONSENT = null; });
+  return sb.from('friend_calendar_group_choice').select('group_id,target_id,share').eq('user_id', myId).then(function(r){
+    if (r.error) { GROUP_CHOICES = null; return; }
+    GROUP_CHOICES = {};
+    (r.data || []).forEach(function(x){ (GROUP_CHOICES[x.group_id] = GROUP_CHOICES[x.group_id] || {})[x.target_id] = !!x.share; });
+  }, function(){ GROUP_CHOICES = null; });
 }
-function groupSkipped(g){ try { return !!localStorage.getItem('fc_grp_skip_' + g.id); } catch (e) { return false; } }
+function memberInfo(id){
+  var p = personById(id) || GROUP_PEOPLE[id];
+  return p ? { id:id, name:p.name || 'Someone', photo:p.photo || '', color:p.color || '#68757a', area:p.area || '' } : { id:id, name:'Someone', photo:'', color:'#68757a', area:'' };
+}
+// Names + photos for group members I'm not friends with yet (allowed: you can see profiles of people who share a group with you).
+function ensureGroupPeople(ids){
+  var missing = ids.filter(function(id){ return !personById(id) && !GROUP_PEOPLE[id]; });
+  if (!missing.length) return Promise.resolve(false);
+  var sb = AS.auth.client(); if (!sb) return Promise.resolve(false);
+  return sb.from('profiles').select('id,name,display_name,first_name,last_name,username,photo_url,location').in('id', missing).then(function(r){
+    (r.data || []).forEach(function(row, i){ GROUP_PEOPLE[row.id] = { id:row.id, name:nameOfProfile(row), photo:row.photo_url || '', area:row.location || '', color:PERSON_COLORS[(i + 3) % PERSON_COLORS.length] }; });
+    return true;
+  }, function(){ return false; });
+}
+function groupUndecided(g){
+  var ch = (GROUP_CHOICES && GROUP_CHOICES[g.id]) || {};
+  return g.memberIds.filter(function(id){ return id !== viewerId && !(id in ch); });
+}
+function groupSkipKey(g, undecided){ return undecided.slice().sort().join(','); }
+function groupSkipped(g, undecided){ try { return localStorage.getItem('fc_grp_skip_' + g.id) === groupSkipKey(g, undecided); } catch (e) { return false; } }
+// A card for each group where there's someone I haven't yet decided about: first time = everyone, later = just the newcomers.
 function renderGroupPrompts(){
   var el = document.getElementById('group-prompt'); if (!el) return;
-  if (!GROUP_CONSENT) { el.innerHTML = ''; return; }
-  var todo = GROUPS.filter(function(g){ return !GROUP_CONSENT[g.id] && !groupSkipped(g) && g.memberIds.filter(function(id){ return id !== viewerId; }).length > 0; });
-  el.innerHTML = todo.map(function(g, i){
-    var owner = g.ownerId === viewerId, o = personById(g.ownerId), others = g.memberIds.filter(function(id){ return id !== viewerId; }).length;
-    return '<div class="gp"><div style="flex:1;min-width:0"><b>' + (owner ? 'Connect everyone in “' + esc(g.name) + '”?' : esc(o ? o.name : 'Someone') + ' added you to “' + esc(g.name) + '”') + '</b>'
-      + '<span class="d">' + (owner ? 'Members who say yes get added to each other’s calendars.' : 'Say yes to share free time with the ' + others + ' other' + (others === 1 ? '' : 's') + ' in it.') + '</span></div>'
-      + '<button class="btn small" data-grp-yes="' + i + '">' + (owner ? 'Connect' : 'Yes') + '</button><button class="x" data-grp-no="' + i + '" aria-label="Not now">✕</button></div>';
+  if (!GROUP_CHOICES) { el.innerHTML = ''; return; }
+  var todo = GROUPS.map(function(g){ return { g:g, un:groupUndecided(g) }; }).filter(function(x){ return x.un.length && !groupSkipped(x.g, x.un); });
+  var need = []; todo.forEach(function(x){ x.un.forEach(function(id){ need.push(id); }); });
+  if (need.some(function(id){ return !personById(id) && !GROUP_PEOPLE[id]; })) ensureGroupPeople(need).then(function(ch){ if (ch) renderGroupPrompts(); });
+  el.innerHTML = todo.map(function(x, i){
+    var g = x.g, first = !GROUP_CHOICES[g.id], o = memberInfo(g.ownerId), names = x.un.slice(0, 2).map(function(id){ return memberInfo(id).name; });
+    var title = first
+      ? (g.ownerId === viewerId ? 'Choose who sees your calendar in “' + esc(g.name) + '”' : esc(o.name) + ' added you to “' + esc(g.name) + '”')
+      : esc(names.join(' and ')) + (x.un.length > 2 ? ' and ' + (x.un.length - 2) + ' more' : '') + ' joined “' + esc(g.name) + '”';
+    return '<div class="gp"><div style="flex:1;min-width:0"><b>' + title + '</b><span class="d">Choose who can see your free time</span></div>'
+      + '<button class="btn small" data-grp-yes="' + i + '">Choose</button><button class="x" data-grp-no="' + i + '" aria-label="Not now">✕</button></div>';
   }).join('');
-  el.querySelectorAll('[data-grp-yes]').forEach(function(b){ b.addEventListener('click', function(){ b.disabled = true; groupConnect(todo[Number(b.dataset.grpYes)]); }); });
+  el.querySelectorAll('[data-grp-yes]').forEach(function(b){ b.addEventListener('click', function(){ openGroupShare(todo[Number(b.dataset.grpYes)].g); }); });
   el.querySelectorAll('[data-grp-no]').forEach(function(b){ b.addEventListener('click', function(){
-    try { localStorage.setItem('fc_grp_skip_' + todo[Number(b.dataset.grpNo)].id, '1'); } catch (e) {}
+    var x = todo[Number(b.dataset.grpNo)];
+    try { localStorage.setItem('fc_grp_skip_' + x.g.id, groupSkipKey(x.g, x.un)); } catch (e) {}
     renderGroupPrompts();
   }); });
 }
-function afterConnect(res, fallbackName){
-  if (!res || !res.ok) { showToast((res && res.error) || 'Couldn’t do that — try again.'); return Promise.resolve(); }
-  var n = res.connected || 0;
-  showToast(n ? 'You’re connected with ' + n + ' ' + (n === 1 ? 'person' : 'people') + ' in “' + (res.name || fallbackName) + '”' : 'You’re in “' + (res.name || fallbackName) + '”. Others will connect as they join.');
-  return loadPeopleAndGroups().then(function(){ renderAll(); });
-}
-function groupConnect(g){
-  var sb = AS.auth.client(); if (!sb) return;
-  sb.rpc('fc_group_connect', { gid:g.id }).then(function(r){
-    if (r.error) { showToast('Group sharing isn’t switched on yet.'); return; }
-    if (GROUP_CONSENT) GROUP_CONSENT[g.id] = true;
-    afterConnect(r.data, g.name);
+// The list: everyone in the group, tick the people who may see your calendar.
+function openGroupShare(g){
+  var card = document.getElementById('sheet-card'), ch = (GROUP_CHOICES && GROUP_CHOICES[g.id]) || {};
+  var others = g.memberIds.filter(function(id){ return id !== viewerId; });
+  openSheet();
+  card.innerHTML = '<h4>Share with “' + esc(g.name) + '”</h4><div style="font-size:13px;color:var(--soft);margin-bottom:10px">Loading…</div>';
+  ensureGroupPeople(others).then(function(){
+    var editable = others.filter(function(id){ return ch[id] !== true; }), already = others.filter(function(id){ return ch[id] === true; });
+    function row(id, on, locked){
+      var m = memberInfo(id);
+      return '<label class="prow"' + (locked ? ' style="opacity:.65;cursor:default"' : '') + '>' + (locked ? '<span style="width:20px;text-align:center;color:var(--accent);font-weight:700">✓</span>' : '<input type="checkbox" class="gs-p" value="' + id + '"' + (on ? ' checked' : '') + '/>')
+        + avatarHtml({ name:m.name, photo:m.photo, color:m.color }, 32) + '<span><div class="pn">' + esc(m.name) + '</div>' + (m.area ? '<div class="pa">' + esc(m.area) + '</div>' : '') + '</span>' + (locked ? '<span class="pa" style="margin-left:auto">sharing</span>' : '') + '</label>';
+    }
+    card.innerHTML = '<h4>Share with “' + esc(g.name) + '”</h4>'
+      + '<div style="font-size:13px;color:var(--soft);margin-bottom:10px">Here’s everyone in the group. <b>Untick anyone you don’t want to see your free time.</b> You only show up on each other’s calendars when you’ve both ticked each other.</div>'
+      + (editable.length ? editable.map(function(id){ return row(id, ch[id] !== false, false); }).join('') : '<div style="font-size:13px;color:var(--soft);padding:4px 0 8px">Nobody new to choose.</div>')
+      + (already.length ? '<div class="sec">Already sharing</div>' + already.map(function(id){ return row(id, true, true); }).join('') : '')
+      + '<div class="form-error" id="gs-err"></div>'
+      + (editable.length ? '<button class="btn" id="gs-save" style="width:100%">Share with ticked people</button>' : '')
+      + '<button class="btn ghost" id="gs-skip" style="width:100%;margin-top:6px">' + (editable.length ? 'Not now' : 'Done') + '</button>';
+    document.getElementById('gs-skip').addEventListener('click', function(){
+      if (editable.length) { var un = groupUndecided(g); try { localStorage.setItem('fc_grp_skip_' + g.id, groupSkipKey(g, un)); } catch (e) {} }
+      closeSheet(); renderAll();
+    });
+    var sv = document.getElementById('gs-save'); if (!sv) return;
+    sv.addEventListener('click', function(){
+      var yes = [], no = [];
+      card.querySelectorAll('.gs-p').forEach(function(c){ (c.checked ? yes : no).push(c.value); });
+      var sb = AS.auth.client(); if (!sb) return;
+      sv.disabled = true; sv.textContent = 'Saving…';
+      sb.rpc('fc_group_share', { gid:g.id, yes:yes, no:no }).then(function(r){
+        if (r.error || !r.data || !r.data.ok) { sv.disabled = false; sv.textContent = 'Share with ticked people'; document.getElementById('gs-err').textContent = (r.data && r.data.error) || 'Couldn’t save — group sharing may not be switched on yet.'; return; }
+        GROUP_CHOICES = GROUP_CHOICES || {}; GROUP_CHOICES[g.id] = GROUP_CHOICES[g.id] || {};
+        yes.forEach(function(id){ GROUP_CHOICES[g.id][id] = true; }); no.forEach(function(id){ GROUP_CHOICES[g.id][id] = false; });
+        var n = r.data.connected || 0;
+        showToast(n ? 'You’re now on ' + n + ' ' + (n === 1 ? 'calendar' : 'calendars') + ' — and they’re on yours' : yes.length ? 'Saved. You’ll connect with people as they tick you back.' : 'Saved.');
+        closeSheet();
+        return loadPeopleAndGroups().then(function(){ renderAll(); });
+      });
+    });
   });
 }
 function newInviteToken(){
@@ -3415,7 +3470,7 @@ function renderGroupInvite(g, justCreated){
   function draw(){
     var url = g.inviteToken ? groupLink(g) : '';
     card.innerHTML = '<h4>' + (justCreated ? '“' + esc(g.name) + '” is ready' : 'Invite to “' + esc(g.name) + '”') + '</h4>'
-      + '<div style="font-size:13px;color:var(--soft);margin-bottom:8px">Share this link or QR code. Everyone who opens it and says yes joins the group and is added to everyone else’s calendar — nobody has to add each other one by one.</div>'
+      + '<div style="font-size:13px;color:var(--soft);margin-bottom:8px">Share this link or QR code. Everyone who opens it joins the group, sees who’s in it, and ticks who may see their calendar — nobody has to add each other one by one.</div>'
       + (url ? '<div id="grp-qr" style="display:flex;justify-content:center;margin:10px 0;background:#fff;border-radius:12px;padding:12px"></div><div class="grplink">' + esc(url) + '</div>'
               + '<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" id="grp-copy">Copy link</button>' + (navigator.share ? '<button class="btn" id="grp-share">Share…</button>' : '') + '<button class="btn ghost" id="grp-reset">Reset link</button></div>'
               : '<div class="form-error" id="grp-err">Making the link…</div>')
@@ -3463,16 +3518,21 @@ function handleJoinFromLink(){
     var card = document.getElementById('sheet-card');
     card.innerHTML = '<h4>Join “' + esc(d.name) + '”?</h4>'
       + '<div style="font-size:14px;margin-bottom:6px">' + esc(d.owner) + ' invited you.</div>'
-      + '<div style="font-size:13px;color:var(--soft);margin-bottom:12px">When you join, you and everyone who has joined' + (d.joined ? ' (' + d.joined + ' so far)' : '') + ' will see each other’s free time on your calendars. You choose who sees what when you add your free time.</div>'
-      + '<button class="btn" id="join-yes" style="width:100%">Join and connect</button><button class="btn ghost" id="join-no" style="width:100%;margin-top:6px">Not now</button>';
+      + '<div style="font-size:13px;color:var(--soft);margin-bottom:12px">When you join, you and everyone who has joined' + (d.joined ? ' (' + d.joined + ' so far)' : '') + ' are in it. After you join you’ll see the list and tick who may see your calendar — untick anyone you don’t want.</div>'
+      + '<button class="btn" id="join-yes" style="width:100%">Join</button><button class="btn ghost" id="join-no" style="width:100%;margin-top:6px">Not now</button>';
     openSheet();
     document.getElementById('join-no').addEventListener('click', function(){ forget(); closeSheet(); });
     document.getElementById('join-yes').addEventListener('click', function(){
       this.disabled = true; this.textContent = 'Joining…';
       sb.rpc('fc_group_join', { gid:gid, tok:tok }).then(function(j){
-        forget(); closeSheet();
-        if (j.error) { showToast('Couldn’t join — try again.'); return; }
-        afterConnect(j.data, d.name);
+        forget();
+        if (j.error || !j.data || !j.data.ok) { closeSheet(); showToast('Couldn’t join — try again.'); return; }
+        // Now they're in: reload, then show the list of everyone so they can tick who may see them.
+        return loadPeopleAndGroups().then(function(){
+          var g = GROUPS.filter(function(x){ return x.id === gid; })[0];
+          if (g) openGroupShare(g); else { closeSheet(); showToast('You’re in “' + d.name + '”.'); }
+          renderAll();
+        });
       });
     });
   });
@@ -3770,7 +3830,7 @@ function openAddGroup(){
     + '<div class="field"><label>Group name</label><input type="text" id="gr-name" placeholder="e.g. Ski crew"/></div>'
     + '<div class="sec">Add friends you already have <span style="font-weight:400;text-transform:none;letter-spacing:0">(optional)</span></div>'
     + (PEOPLE.length > 1 ? PEOPLE.filter(function(p){ return p.id !== viewerId; }).map(function(p){ return personPickRow(p, 'gr-member', false); }).join('') : '<div style="font-size:13px;color:var(--soft);margin-bottom:6px">No friends yet — that’s fine. You’ll get a link and QR code to share with the group next.</div>')
-    + '<div style="font-size:12px;color:var(--soft);margin:2px 0 8px">Everyone who joins the group (by your link, or by saying yes when they’re added) ends up on each other’s calendars — nobody has to add each other one by one.</div>'
+    + '<div style="font-size:12px;color:var(--soft);margin:2px 0 8px">Everyone who joins (by your link, or when you add them) gets a list of the group and ticks who may see their calendar — nobody has to add each other one by one.</div>'
     + '<div class="form-error" id="gr-error"></div>'
     + '<button class="btn" id="gr-save" style="width:100%">Create</button>'
     + '<button class="btn ghost" id="gr-cancel" style="width:100%;margin-top:6px">Cancel</button>';
@@ -3797,8 +3857,8 @@ function openAddGroup(){
       .then(function(row){
         var ng = { id:row.id, name:row.name, memberIds:[viewerId].concat(memberIds), ownerId:viewerId, inviteToken:'' };
         GROUPS.push(ng); ensureGroupThread(ng);
-        // Making the group is the owner's "yes": from now on anyone who joins is connected to them.
-        try { sb.rpc('fc_group_connect', { gid:ng.id }).then(function(){ if (GROUP_CONSENT) GROUP_CONSENT[ng.id] = true; renderAll(); }, function(){}); } catch (e) {}
+        // The owner ticks the friends they just added; everyone else chooses for themselves.
+        if (memberIds.length) { try { sb.rpc('fc_group_share', { gid:ng.id, yes:memberIds, no:[] }).then(function(r){ if (!r.error && GROUP_CHOICES) { GROUP_CHOICES[ng.id] = {}; memberIds.forEach(function(id){ GROUP_CHOICES[ng.id][id] = true; }); renderAll(); } }, function(){}); } catch (e) {} }
         renderAll(); renderGroupInvite(ng, true);
       })
       .catch(function(e){
