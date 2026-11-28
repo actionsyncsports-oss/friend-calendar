@@ -1015,6 +1015,7 @@ function bindPhotoRow(card, redraw){
 
 /* ---------------- STATE ---------------- */
 var viewerId = null;      // set once, to the real signed-in user's id, in loadPeopleAndGroups()
+var _peopleAll = false;   // the quick row shows everyone instead of just "free this week + your ten closest"
 var selectedIds = [];     // who's counted when looking for overlap -- filled in alongside viewerId
 var peopleSearch = '';    // typed into the "Counting" bar's find box -- narrows which person chips show, not who's selected
 var activeGroupId = null; // which group chip (if any) the person-chip row is currently scoped to -- null = Everyone
@@ -1063,13 +1064,24 @@ function friendOrder(viewer){
   if (_orderCache.sig !== sig) _orderCache = { sig:sig, byViewer:{} };
   if (!_orderCache.byViewer[viewer]) {
     var st = friendStats(viewer), ids = PEOPLE.filter(function(p){ return p.id !== viewer; }).map(function(p){ return p.id; });
-    ids.sort(function(a, b){
-      return (st[b].together - st[a].together) || (Math.round(st[b].sim * 1000) - Math.round(st[a].sim * 1000)) || (personById(a).name < personById(b).name ? -1 : 1);
+    // People who actually have free time shared in the next week come first, so a long list of friends with empty
+    // calendars sinks to the bottom instead of burying the ones you can make plans with.
+    var avail = {};
+    ids.forEach(function(id){
+      for (var i = 0; i < 7; i++) { if (windowsFor(id, addDaysStr(TODAY, i), viewer).length) { avail[id] = 1; break; } }
     });
-    _orderCache.byViewer[viewer] = { ids:ids, stats:st };
+    function byTogether(a, b){
+      return (st[b].together - st[a].together) || (Math.round(st[b].sim * 1000) - Math.round(st[a].sim * 1000)) || (personById(a).name < personById(b).name ? -1 : 1);
+    }
+    var top = ids.slice().sort(byTogether).filter(function(id){ return st[id].together > 0; }).slice(0, 10);   // the ten you've actually done things with most
+    ids.sort(function(a, b){ return ((avail[b] || 0) - (avail[a] || 0)) || byTogether(a, b); });
+    _orderCache.byViewer[viewer] = { ids:ids, stats:st, avail:avail, top:top };
   }
   return _orderCache.byViewer[viewer].ids;
 }
+// The people worth showing in the quick row: anyone with free time shared this week, plus the ten you do the most with.
+function friendQuickIds(){ friendOrder(viewerId); var c = _orderCache.byViewer[viewerId]; if (c.ids.length <= 10) return c.ids.slice(); return c.ids.filter(function(id){ return c.avail[id] || c.top.indexOf(id) !== -1; }); }
+function friendHasFree(id){ friendOrder(viewerId); return !!_orderCache.byViewer[viewerId].avail[id]; }
 function friendNote(viewer, id){ friendOrder(viewer); var x = _orderCache.byViewer[viewer].stats[id]; if (!x) return ''; return (x.together ? x.together + (x.together === 1 ? ' outing' : ' outings') + ' together' : 'no outings together yet') + ', ' + Math.round(x.sim * 100) + '% of your free time overlaps'; }
 function othersOrdered(){ return friendOrder(viewerId).map(personById); }
 
@@ -1383,6 +1395,12 @@ function renderFilters(){
     // group) is what brings the rest back.
     var pool = activeGroup ? othersOrdered().filter(function(p){ return activeGroup.memberIds.indexOf(p.id) !== -1; }) : othersOrdered();
     var others = pool.filter(function(p){ return !q || p.name.toLowerCase().indexOf(q) !== -1; });
+    // With lots of friends, "Everyone" shows those with free time this week plus your ten closest; the rest are one tap away.
+    var hidden = 0;
+    if (!activeGroup && !q && !_peopleAll) {
+      var quick = friendQuickIds(), keep = others.filter(function(p){ return quick.indexOf(p.id) !== -1; });
+      hidden = others.length - keep.length; others = keep;
+    }
     var chips = document.getElementById('people-chips');
     // First names only, so the row stays short enough to scan; two people who
     // share a first name get a last initial. Full names are in the Friends list.
@@ -1396,7 +1414,12 @@ function renderFilters(){
     chips.innerHTML = addBtn + (others.length ? others.map(function(p){
       var on = selectedIds.indexOf(p.id) !== -1;
       return '<button class="story' + (on ? '' : ' off') + '" data-person="' + p.id + '" aria-pressed="' + on + '" title="' + esc(p.name + ' — ' + friendNote(viewerId, p.id)) + '">' + avatarHtml(p, 50) + '<span class="nm">' + esc(short(p)) + '</span></button>';
-    }).join('') : (q ? '<span class="lbl">No one matches “' + esc(peopleSearch.trim()) + '”</span>' : ''));
+    }).join('') : (q ? '<span class="lbl">No one matches “' + esc(peopleSearch.trim()) + '”</span>' : ''))
+      + (hidden ? '<button class="story add" id="people-more" title="Show everyone" aria-label="Show ' + hidden + ' more friends"><span class="av">+' + hidden + '</span><span class="nm">More</span></button>'
+        : (_peopleAll && !activeGroup && !q && friendOrder(viewerId).length > friendQuickIds().length ? '<button class="story add" id="people-less" title="Show fewer" aria-label="Show fewer friends"><span class="av">–</span><span class="nm">Fewer</span></button>' : ''));
+    var moreB = document.getElementById('people-more'), lessB = document.getElementById('people-less');
+    if (moreB) moreB.addEventListener('click', function(){ _peopleAll = true; renderFilters(); });
+    if (lessB) lessB.addEventListener('click', function(){ _peopleAll = false; renderFilters(); });
     chips.querySelectorAll('[data-person]').forEach(function(b){
       b.addEventListener('click', function(){
         var id = b.dataset.person, i = selectedIds.indexOf(id);
@@ -1656,7 +1679,10 @@ function renderDaySheet(){
     html += '<div class="lane"><div class="nm"><b>Best</b></div><div class="track"><div class="bar bestband" style="left:'
       + ((an.best.start - HMIN) / span * 100) + '%;width:' + ((an.best.end - an.best.start) / span * 100) + '%"></div></div><div class="lanearea"></div></div>';
   }
-  ids.forEach(function(id){
+  // People with nothing shared that day collapse into one line instead of a row of empty bars each.
+  var quiet = ids.filter(function(id){ return id !== viewerId && !segmentsFor(id, date).length; });
+  if (ids.length - quiet.length < 1) quiet = [];
+  ids.filter(function(id){ return quiet.indexOf(id) === -1; }).forEach(function(id){
     var p = personById(id);
     html += '<div class="lane"><div class="nm">' + avatarHtml(p, 16, { me: id === viewerId }) + ' ' + esc(p.name) + '</div><div class="track">'
       + segmentsFor(id, date).map(function(g){
@@ -1665,6 +1691,7 @@ function renderDaySheet(){
       + '</div><div class="lanearea">' + esc(placeLabelFor(id, date))
       + (hasKnownTz(id) ? '' : ' <span style="color:var(--busy)" title="They haven’t opened the app since time zones started saving, so this is showing as your own zone and may be off.">⚠ time zone unknown</span>') + '</div></div>';
   });
+  if (quiet.length) html += '<div class="lane quiet" style="opacity:.7"><div class="nm" style="width:auto;flex:1;white-space:normal">Nothing shared this day: ' + quiet.map(function(id){ return esc((personById(id) || {}).name || ''); }).join(', ') + '</div></div>';
 
   // --- the viewer's own blocks for this day, and a way to add one ---
   var mine = viewer.blocks.filter(function(b){ return blockLevel(b) !== 0 && blockApplies(b, date); });
